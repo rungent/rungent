@@ -135,16 +135,16 @@ async def test_transport_retries_malformed_tool_arguments_with_compactness_hint(
     assert attempts == 2
     assert events == [
         TextDelta("working"),
-            ModelRetrying(
-                retry=1,
-                max_retries=2,
-                delay_seconds=0,
-                reason="invalid_tool_arguments",
-                tool_name="initialize",
-                arguments_chars=13,
-                error_kind="JSONDecodeError",
-                error_position=13,
-            ),
+        ModelRetrying(
+            retry=1,
+            max_retries=2,
+            delay_seconds=0,
+            reason="invalid_tool_arguments",
+            tool_name="initialize",
+            arguments_chars=13,
+            error_kind="JSONDecodeError",
+            error_position=13,
+        ),
         TextDelta("working"),
         ModelCompleted(
             text="working",

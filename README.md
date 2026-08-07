@@ -71,6 +71,4 @@ on `v*` tags — do not `uv publish` / `npm publish` from your laptop.
 git push origin main --tags
 ```
 
-Before the first publish, configure [PyPI](https://docs.pypi.org/trusted-publishers/) and
-[npm](https://docs.npmjs.com/trusted-publishers) Trusted Publishing for
-`rungent/rungent` → workflow `release.yml`.
+One-time Trusted Publishing setup: see [`RELEASING.md`](RELEASING.md).

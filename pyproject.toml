@@ -21,6 +21,13 @@ dependencies = [
   "pydantic>=2.10.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/rungent/rungent"
+Documentation = "https://github.com/rungent/rungent/tree/main/docs"
+Repository = "https://github.com/rungent/rungent"
+Issues = "https://github.com/rungent/rungent/issues"
+Changelog = "https://github.com/rungent/rungent/releases"
+
 [project.optional-dependencies]
 fastapi = ["fastapi>=0.115.0"]
 sqlalchemy = ["sqlalchemy[asyncio]>=2.0.36"]

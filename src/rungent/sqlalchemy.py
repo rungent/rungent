@@ -277,7 +277,7 @@ class SQLAlchemyStore:
                         payload=run.model_dump(mode="json"),
                         updated_at=run.updated_at,
                     )
-                )
+                ),
             )
             return run if result.rowcount == 1 else None
 
