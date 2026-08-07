@@ -1,0 +1,100 @@
+---
+title: Agent baseline testing
+description: Lock harness correctness and measure application behavior before release.
+---
+
+Rungent uses two baseline layers.
+
+## Deterministic harness baseline
+
+Runs with `ScriptedModel` and must be part of normal CI. It verifies infrastructure independent of
+model quality:
+
+- schema generation and execution-time validation;
+- plain response completion;
+- multi-step tool calling;
+- text, single-choice, multi-choice, custom-choice, and grouped-form interaction pause/resume;
+- approval argument freezing, acceptance, and rejection;
+- timeout and tool error isolation;
+- equivalent successful write deduplication and explicit repeat opt-out;
+- session ownership;
+- transient model retry, retry exhaustion, and max-step termination;
+- ACS event ordering and TypeScript parsing;
+- model-step, public progress, persistence, and replay behavior;
+- SQL persistence round trips.
+
+## Application behavior baseline
+
+Use `BaselineCase` with the actual configured model in a scheduled or opt-in test job:
+
+```python
+TRIP_BASELINE = [
+    BaselineCase(
+        name="swap two known places",
+        input="Swap Asakusa Temple and Tokyo Tower",
+        expected_tools=("swap_places",),
+    ),
+    BaselineCase(
+        name="ambiguous place asks user",
+        input="Move the museum to day two",
+        expected_interactions=("choice",),
+        responses=("museum_edo",),
+        expected_tools=("move_place",),
+    ),
+    BaselineCase(
+        name="delete day requires approval",
+        input="Delete day three",
+        expected_interactions=("approval",),
+        responses=("approve",),
+        expected_tools=("remove_day",),
+    ),
+]
+
+suite = BaselineSuite(
+    runtime=runtime,
+    cases=TRIP_BASELINE,
+    identity=Identity(subject_id="baseline"),
+    resource={"trip_id": fixture_trip.id},
+    deps={"trips": fixture_trip_service},
+)
+report = await suite.run()
+report.assert_passed()
+print(f"pass rate: {report.pass_rate:.1%}")
+```
+
+Use `followups=(...)` to test multiple turns in the same session. Pass `setup_case` when every case
+needs a fresh database fixture; it returns `BaselineEnvironment(resource=..., deps=...)`.
+Use `before_all` and `after_all` for resources normally managed by application lifespan, such as
+HTTP clients used by live-model baselines.
+Application assertions should verify final database state, not only the assistant's prose.
+
+Tool and interaction sequences are exact by default, which is appropriate for `ScriptedModel` and
+strict behavior checks. For live models, set `tool_match="contains"` or
+`interaction_match="contains"` when required events must occur in order but safe retries are
+acceptable. An empty expected sequence with `contains` allows an optional branch; use a state or
+trace assertion to constrain what that branch may do. Keep final-state assertions enabled, and do
+not use `contains` to hide non-idempotent duplicate writes.
+
+Expose the suite as a module value and run the Rungent-owned CLI from the host project:
+
+```bash
+rungent baseline routers.agent.baseline:baseline_suite
+rungent baseline routers.agent.baseline:baseline_suite --case "add external place"
+```
+
+The baseline command is a developer/evaluation tool. It is intentionally not an agent-callable
+`@tool`, so the model under evaluation cannot modify its own cases or verdicts.
+
+### Minimum Roasea matrix
+
+| Capability | Required scenarios |
+| --- | --- |
+| Place editing | add, remove, move, swap, ambiguous match |
+| Day editing | add, remove with approval, invalid day |
+| Transport | each valid mode, invalid mode correction |
+| Context | short follow-up resolves against previous interaction |
+| Safety | rejection changes nothing, tool errors do not fabricate success |
+| Reliability | repeated idempotent request, grouped questions, transient retry, max-step failure |
+
+Track pass rate, unexpected tool rate, unnecessary interaction rate, and final state accuracy. Do not
+use prose similarity as the primary correctness metric.

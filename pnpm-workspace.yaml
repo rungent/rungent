@@ -1,0 +1,21 @@
+packages:
+  - apps/*
+  - packages/*
+
+catalog:
+  next: 16.2.3
+  react: 19.2.5
+  react-dom: 19.2.5
+  typescript: ^6.0.2
+  '@types/node': ^25.6.0
+  '@types/react': ^19.2.14
+  '@types/react-dom': ^19.2.3
+  tailwindcss: ^4.2.2
+  '@tailwindcss/postcss': ^4.2.2
+
+allowBuilds:
+  '@parcel/watcher': true
+  '@swc/core': true
+  esbuild: true
+  sharp: true
+

@@ -1,0 +1,33 @@
+---
+title: Persistence
+description: Store sessions, messages, runs, and pending interactions in application-owned storage.
+---
+
+`MemoryStore` is for tests and local prototypes. Production applications should use
+`SQLAlchemyStore`.
+
+```python
+from sqlalchemy.ext.asyncio import async_sessionmaker
+from rungent.sqlalchemy import RungentBase, SQLAlchemyStore
+
+store = SQLAlchemyStore(async_sessionmaker(engine, expire_on_commit=False))
+```
+
+Add `RungentBase.metadata` to the application's Alembic target metadata and generate a normal
+application migration. Rungent never runs `create_all()` during production startup.
+
+The built-in schema stores:
+
+- owned sessions and resource scope;
+- normalized messages;
+- Run state, frozen pending interactions, and deferred host task bindings.
+- append-only public ACS events with a unique `(run_id, seq)` order.
+
+Events are persisted before they are yielded to SSE consumers. `GET /runs/{run_id}/events` supports
+`after_seq` replay for history and reconnect handling. Only public runtime events belong in this
+table: provider reasoning, prompts, dependencies, private tool data, and exception details must
+remain server-side.
+
+Tool implementations own their business transactions. Irreversible commits should be atomic.
+Reversible work may instead use a persisted deferred job with small idempotent item transactions;
+Rungent coordinates pause/resume and cancellation but never attempts an implicit rollback.

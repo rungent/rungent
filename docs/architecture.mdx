@@ -1,0 +1,68 @@
+---
+title: Architecture and trade-offs
+description: The deliberately small boundary Rungent standardizes, and what stays in the host app.
+---
+
+## Decision
+
+Rungent is an embedded Python runtime with optional adapters, not an agent platform. The host
+application owns authentication, business services, database transactions, prompts, tools, and UI.
+Rungent owns the model/tool loop and its externally observable lifecycle.
+
+```mermaid
+flowchart LR
+  UI["Product UI"] --> SDK["@rungent/sdk"]
+  SDK --> HTTP["FastAPI adapter"]
+  HTTP --> Runtime["Rungent Runtime"]
+  Runtime --> Model["Model adapter"]
+  Runtime --> Tools["Typed application tools"]
+  Runtime --> Store["Memory or SQLAlchemy Store"]
+  Tools --> Domain["Application services"]
+```
+
+This boundary gives Roasea direct, typed access to its existing services without a sidecar network
+hop or duplicated authorization model. A sidecar can be added later as another transport only when
+multiple processes or languages genuinely need the same runtime.
+
+## Standardized lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> running
+  running --> running: model/tool step
+  running --> waiting_input: request_input or approval
+  waiting_input --> running: user response
+  running --> waiting_external: deferred host task
+  waiting_external --> running: trusted host completion
+  running --> completed: final assistant message
+  running --> running: transient provider retry (same model step)
+  running --> failed: exhausted provider retries or max model steps
+  running --> cancelled: cancellation
+```
+
+A session has at most one active Run. The entire Run keeps one monotonic ACS event sequence across
+pause/resume boundaries. Approvals persist a validated, normalized tool invocation; resuming cannot
+substitute new arguments. A deferred task persists its host task ID and original tool call;
+completion is trusted, terminal, and consumable exactly once.
+
+## Packages
+
+| Package | Responsibility |
+| --- | --- |
+| `rungent` | Agent definition, `@tool`, loop, interactions, ACS, model/store ports |
+| `rungent.fastapi` | Four resource-oriented endpoints and SSE transport |
+| `rungent.sqlalchemy` | Application-owned persistent store |
+| `rungent.testing` | deterministic harness tests and real-model application baselines |
+| `@rungent/sdk` | headless stream parser, client, and reducer |
+| `@rungent/docs` | human docs plus `/llms.txt`, `/llms-full.txt`, raw Markdown routes |
+
+## Deliberate omissions
+
+- No sidecar until an actual cross-process consumer requires it.
+- No skill router; begin with one product Agent and normal typed tools.
+- No styled chat component; Roasea keeps its design system and renders the headless state.
+- No provider-specific event types in the browser.
+- No prompt-based safety decisions where deterministic runtime policy can enforce them.
+- No automatic production schema creation; migrations remain application-owned.
+
+Add a new abstraction only after two real integrations need the same boundary.

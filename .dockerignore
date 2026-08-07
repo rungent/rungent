@@ -1,0 +1,18 @@
+# Allowlist context for a future Python package image.
+# Ignore everything, then re-include only runtime packaging inputs.
+**
+
+!pyproject.toml
+!uv.lock
+!README.md
+!RUNGENT.md
+!LICENSE
+!src/
+!src/**
+
+# Never ship local junk even if matched above
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/.env
+**/.env.*

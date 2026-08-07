@@ -1,0 +1,145 @@
+---
+title: AI reference
+description: Compact, normative Rungent context for coding agents.
+---
+
+## Objective
+
+Embed Rungent into an existing Python application. Define one `Agent`, typed `@tool` functions, a
+`Runtime`, application identity/context factories, and the FastAPI router. Use `@rungent/sdk` in the
+frontend. Never implement another tool loop.
+
+## Canonical imports
+
+```python
+from rungent import (
+    Agent,
+    DeferredRequest,
+    Identity,
+    InteractionRequest,
+    Runtime,
+    RunActivity,
+    ToolContext,
+    ToolContinuation,
+    ToolResult,
+    tool,
+)
+from rungent.fastapi import create_router
+from rungent.llm import OpenAICompatibleModel
+from rungent.sqlalchemy import RungentBase, SQLAlchemyStore
+from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_baseline
+```
+
+## Required invariants
+
+- Tool parameter types are mandatory; the first parameter is `ToolContext`.
+- `effect` and `approval` must be explicit on every business tool.
+- `approval="always"` requires a concrete `confirmation` string or callable, then freezes and
+  gates the exact invocation. Never use a generic title as the approval prompt.
+- Use one `form` for independent, already-known questions; ask sequentially only when later
+  questions depend on earlier answers. Do not ask for approval in plain assistant text.
+- Choice interactions declare `multiple`, `allow_custom`, and safe `allow_skip`; clients submit
+  `{selected: string[], custom?: string, skipped?: boolean}` and the runtime validates it before
+  resuming.
+- Form interactions contain 1–8 typed questions; clients submit
+  `{answers: {question_id: string | ChoiceResponse}}` once.
+- `report_progress` is a reserved built-in tool for short, public updates during multi-step work.
+  It is not raw reasoning and has no business side effect.
+- Long-running host tools call `await ctx.report_progress(message, public=...)` to persist and
+  stream real application progress before the tool completes. All updates from one tool call use a
+  stable activity ID and project as one changing SDK activity while the persisted event stream
+  retains every update. The activity remains `running` until the tool succeeds or fails.
+- An Agent may declare a host-authored `run_activity(ctx, content)` provider. Rungent emits its
+  `RunActivity` immediately, then updates the same persisted running activity after three silent
+  seconds and every five seconds until the model stream advances. These are public working states,
+  never provider reasoning or hidden chain of thought.
+- `Runtime.model_step_timeout_seconds` bounds each provider attempt and
+  `model_step_total_timeout_seconds` optionally bounds the complete model step. Retries receive a
+  fresh per-attempt budget; timeout persists `run.failed` through the normal terminal path.
+- `ToolResult.data` is model-visible, `message` is safe progress text, and `public` is optional UI data.
+- `ToolResult.interaction` may contain a typed `InteractionRequest` and frozen continuation tool.
+  Rungent validates and persists it, then directly invokes the `requires_interaction_response`
+  continuation after the user answers without another model step.
+  Model-facing results have an explicit `tool_status: success|error` envelope; `data.ok=false`,
+  exceptions, timeouts, and validation errors are failures and may be retried. A failed
+  `ToolResult` may use its safe `message` as the public failure activity; exception details remain
+  private.
+- `ToolResult.deferred=DeferredRequest(...)` pauses a successful tool in `waiting_external`
+  without completing its activity or spending another model step. The host reports safe progress
+  and calls `Runtime.resume_deferred` with the authoritative terminal `ToolResult`. Rungent
+  atomically claims and leases the resumed execution before returning to the model, so recovery
+  workers cannot classify the active continuation as interrupted; task IDs are
+  bound to one Run and can be consumed once. Use `external_task_canceller` to connect Run
+  cancellation to host-owned work.
+- After a validated non-approval response, `ToolContext.interaction_response` exposes its ID, kind,
+  original prompt, and normalized value to host tools for trusted sequential workflows. Declare
+  `requires_interaction_response=True` on tools that consume it; Rungent hides those tools before a
+  real response and clears the trusted response after the first attempted consumption.
+- Equivalent successful non-read calls are deduplicated within a Run after argument normalization.
+  Use an explicit batch/count argument; set `deduplicate=False` only for genuinely repeatable writes.
+- Sessions are owned by `Identity`; identity resolution belongs to the host application.
+- One session has at most one active Run; resume the waiting Run instead of starting another.
+- ACS `seq` is monotonic for the complete Run, including every pause/resume cycle.
+- Model step IDs and the 16-step default budget are also monotonic across pause/resume cycles;
+  provider retries do not consume additional model steps.
+- A provider completion with neither text nor tool calls is retried by the bounded harness loop;
+  it never becomes a successful empty assistant message.
+- The model transport retries timeouts, network failures, HTTP 408/429, and 5xx responses three
+  times by default. Retries stay in the same model step and emit `message.reset` plus
+  `model.retrying`; clients replace partial output and show `retry/max_retries` progress.
+- Malformed or truncated tool-argument JSON follows the same bounded retry path with reason
+  `invalid_tool_arguments`. The retry adds a compact-valid-JSON correction and cannot execute a
+  partial tool call.
+- Public ACS events are persisted before delivery. Never expose or persist provider
+  `reasoning_content`, hidden chain of thought, private tool data, or exception details.
+- Dynamic business state comes from `Agent.context`, not stale conversation prose.
+- Production uses `SQLAlchemyStore` and an application Alembic migration.
+- Frontends consume ACS through `@rungent/sdk`.
+- Terminal events settle unfinished activities; call SDK `failRungentState` for transport failures.
+- Every integration ships deterministic and real-model baseline cases.
+- `OpenAICompatibleModel(extra_body=...)` adds trusted provider-specific top-level request fields;
+  `LLM_EXTRA_BODY` accepts the same value as a JSON object and cannot override core request fields.
+
+## HTTP contract
+
+```text
+POST /sessions
+GET  /sessions/{session_id}
+GET  /sessions/{session_id}/runs
+POST /sessions/{session_id}/runs
+GET  /runs/{run_id}/events?after_seq={seq}
+GET  /runs/{run_id}/events/stream?after_seq={seq}
+POST /runs/{run_id}/responses
+POST /runs/{run_id}/cancel
+```
+
+## ACS envelope
+
+```json
+{
+  "v": 1,
+  "id": "evt_...",
+  "seq": 4,
+  "type": "interaction.requested",
+  "session_id": "ses_...",
+  "run_id": "run_...",
+  "created_at": "2026-08-03T00:00:00Z",
+  "data": {}
+}
+```
+
+The public lifecycle is `run.started`, optional host-authored running `activity.updated`, repeated
+`model.started` / optional model-wait `activity.updated` / optional `model.retrying` /
+`model.completed` steps, `activity.updated`, tool, interaction, and external-task events, message
+events, and a terminal `run.completed` or `run.failed`. A deferred tool emits
+`external_task.started`, `run.waiting_external`, zero or more `external_task.progress` events, then
+a trusted `external_task.completed|failed|cancelled`. Frontends render this as a work timeline and
+may collapse it after completion.
+
+Text interactions containing two or more numbered alternatives are rejected as
+`invalid_interaction`; callers must use a typed `choice` so clients can render real options and the
+standard custom-answer row. Tool activities expose their stable failure `code` to SDK consumers.
+
+`run.failed` may include a stable `code` and `retryable` flag. Bounded-loop exhaustion uses
+`model_step_limit_exceeded`; the TypeScript reducer projects these fields as `errorCode` and
+`retryable`, while the configured numeric limit remains internal.

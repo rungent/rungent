@@ -1,0 +1,25 @@
+# Normalize text; keep Python/JS sources as LF
+* text=auto eol=lf
+
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.mdx text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary / lockfiles as-is
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.whl binary
+uv.lock -text
+pnpm-lock.yaml -text

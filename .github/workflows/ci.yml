@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11'
+      - run: uv sync --all-extras --locked
+      - run: uv run ruff format --check src tests examples
+      - run: uv run ruff check src tests examples
+      - run: uv run pyright src
+      - run: uv run pytest -q -W error
+      - run: uv run python -m rungent.cli doctor examples.roasea.assistant:trip_agent
+      - run: uv build
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build

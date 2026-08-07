@@ -1,0 +1,48 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+:root {
+  --fd-layout-width: 1480px;
+  --fd-page-width: 860px;
+  --radius: 0.65rem;
+}
+
+body {
+  background-image:
+    radial-gradient(circle at 15% 0%, color-mix(in srgb, #2f6df6 8%, transparent), transparent 28rem),
+    radial-gradient(circle at 90% 15%, color-mix(in srgb, #21b18a 7%, transparent), transparent 24rem);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.brand-mark {
+  display: grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border-radius: 0.55rem;
+  color: white;
+  background: linear-gradient(135deg, #1748bf, #3185ff);
+  box-shadow: 0 8px 25px -12px #1748bf;
+}
+
+.doc-heading {
+  margin-bottom: 2rem;
+}
+
+.eyebrow {
+  margin-bottom: 0.55rem;
+  color: var(--color-fd-muted-foreground);
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+

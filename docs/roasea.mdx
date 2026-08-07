@@ -1,0 +1,46 @@
+---
+title: Roasea reference integration
+description: Embed Rungent as Roasea's only agent loop.
+---
+
+Roasea uses embedded mode because tools need direct access to SQLAlchemy and map services.
+The migration boundary is small:
+
+1. Convert functions in `api/services/llm/tools.py` to typed `@tool` definitions.
+2. Move the planner prompt into one `Agent`.
+3. Convert `build_snapshot()` into the Agent context provider.
+4. Mount the Rungent FastAPI router under `/api/assistant`.
+5. Create sessions with `resource={"trip_id": trip_id}`.
+6. Replace browser-provided history with Rungent-owned sessions.
+7. Use `@rungent/sdk` in `chat-panel.tsx` and revalidate Trip SWR state after `run.completed`.
+8. Add the matrix from [Agent baseline testing](/docs/baseline).
+
+`remove_place` and `remove_day` should require approval. Moving, swapping, renaming, and changing
+transport may execute directly because the UI already makes those changes reversible.
+
+Match tool granularity to the user's business action. “Change every leg to driving” should call one
+Roasea-owned batch tool that updates all valid legs in one transaction. It should not make the
+model resolve every place and issue repeated single-stop writes, and Rungent's bounded-loop limit
+should not be raised to compensate for such an undersized interface.
+
+Rungent transports and persists final assistant content as an opaque string. Roasea defines the
+Agent's Markdown writing rules and renders only assistant output with its own sanitized, streaming
+Markdown component; user-authored content remains plain text. Formatting, link policy, and visual
+styling stay outside Rungent and `@rungent/sdk`.
+
+See the scaffold in `examples/roasea/` in the repository.
+
+## Importing externally generated itineraries
+
+Treat a long import as one staged business operation, not a sequence of `add_place` calls:
+
+1. The product Agent denoises the latest user-corrected itinerary into a typed candidate.
+2. `prepare_itinerary_import` resolves places and persists an application-owned draft. It returns
+   a structured diff through `ToolResult.public` without changing the trip.
+3. The Agent uses `request_input` for unresolved places, dates, and merge conflicts, then refreshes
+   the draft with another application tool.
+4. One `approval="always"` commit tool freezes the draft ID and expected trip revision. The host
+   checks that revision and applies the whole diff in one database transaction.
+
+Rungent owns the durable clarification and approval lifecycle. Roasea owns import drafts,
+domain validation, place providers, optimistic concurrency, the diff UI, and the transaction.

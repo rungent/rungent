@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches package versions
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          PY_VER=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          NPM_VER=$(node -p "require('./packages/sdk/package.json').version")
+          echo "tag=$TAG py=$PY_VER npm=$NPM_VER"
+          if [ "$TAG" != "$PY_VER" ] || [ "$TAG" != "$NPM_VER" ]; then
+            echo "::error::Tag v$TAG must match pyproject.toml ($PY_VER) and packages/sdk/package.json ($NPM_VER)"
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11'
+
+      - name: Python checks and build
+        run: |
+          uv sync --all-extras --locked
+          uv run ruff format --check src tests examples
+          uv run ruff check src tests examples
+          uv run pyright src
+          uv run pytest -q -W error
+          uv run python -m rungent.cli doctor examples.roasea.assistant:trip_agent
+          uv build
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: TypeScript checks and build
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+          pnpm build
+
+      - name: Publish to PyPI
+        run: uv publish
+
+      - name: Publish @rungent/sdk to npm
+        working-directory: packages/sdk
+        run: pnpm publish --access public --no-git-checks
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz

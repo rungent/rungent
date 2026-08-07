@@ -1,0 +1,165 @@
+---
+title: Python API
+description: Agents, typed tools, model adapters, runtime context, and results.
+---
+
+## Agent
+
+An `Agent` is an immutable definition containing instructions, tools, optional dynamic context and
+public run-activity providers, and an optional model override.
+
+```python
+agent = Agent(
+    name="trip_planner",
+    instructions="Use tools to update the trip.",
+    tools=[add_place, move_place, remove_day],
+    context=trip_snapshot,
+    run_activity=describe_run,
+)
+```
+
+The context provider runs before every model step so the model sees current application state:
+
+```python
+async def trip_snapshot(ctx: ToolContext) -> str:
+    return await ctx.deps["trips"].snapshot(ctx.resource["trip_id"])
+```
+
+`ctx.current_input` is the accepted input for the current Run. Use it when a host-owned ingestion
+job needs the original text without asking the model to echo it into tool arguments.
+
+Latency-sensitive applications can describe observable work before the provider emits its first
+event. The callback is deterministic host code, not another model call:
+
+```python
+async def describe_run(ctx: ToolContext, content: str) -> RunActivity:
+    return RunActivity(
+        message="Received the itinerary; extracting its days and places",
+        waiting_message="Generating the itinerary structure; no changes have been written",
+        long_wait_message="Still organizing the detailed itinerary; the resource is unchanged",
+        continuation_message="Preparing the result",
+        public={"stage": "extracting_itinerary"},
+    )
+```
+
+Rungent persists the initial activity immediately. If the model stream is silent, it updates that
+same activity after three seconds and every five seconds thereafter. The two intervals are
+configurable on `Runtime` for deterministic tests. Once the model step advances, the activity is
+completed; real tool progress should then use `ToolContext.report_progress`.
+`model_step_timeout_seconds` bounds each provider attempt;
+`model_step_total_timeout_seconds` optionally bounds all retries in that model step.
+
+An optional `Agent.run_initializer(ctx, content)` may return one registered `ToolCall` before the
+first model step. Use it only for deterministic application routing such as an obvious pasted
+itinerary; returning `None` preserves the normal model path.
+
+## Tool
+
+`@tool` accepts:
+
+| Option | Values | Meaning |
+| --- | --- | --- |
+| `effect` | `read`, `write`, `destructive`, `external` | Audit and scheduling classification |
+| `approval` | `never`, `always` | Deterministic execution gate |
+| `title` | string | User-facing operation title |
+| `timeout_seconds` | number | Hard execution timeout |
+| `parallel` | boolean | Reserved for explicitly independent reads |
+| `deduplicate` | boolean | Skip equivalent successful non-read calls in one Run; default `true` |
+| `requires_interaction_response` | boolean | Expose only after a real user answer and consume that answer once |
+
+Use `Annotated`, `Literal`, Enum, unions, and Pydantic models to describe arguments. Tool results are
+structured:
+
+```python
+return ToolResult(
+    data={"stop_id": stop.id},      # visible to the model
+    message="Added Tokyo Tower",    # safe progress text
+    public={"resource": "trip"},   # optional frontend payload
+)
+```
+
+When a host-owned task must wait for browser or worker observations, return a durable task instead
+of holding the tool coroutine open:
+
+```python
+return ToolResult(
+    deferred=DeferredRequest(
+        task_id=job.id,
+        message="Waiting for route observations",
+        public={"completed": 0, "total": job.total},
+    )
+)
+```
+
+The Runtime moves the Run to `waiting_external`. Host code may call
+`report_external_progress(...)`, then completes it exactly once with
+`await runtime.resume_deferred(run_id, job.id, ToolResult(...), identity=identity, deps=deps)`.
+The original tool activity completes only then, and the next model step receives the authoritative
+result. Configure `external_task_canceller` when Run cancellation must stop the host job.
+
+Do not put database sessions or credentials into tool arguments. Put request-scoped services in
+`ctx.deps`, stable resource identifiers in `ctx.resource`, and caller identity in `ctx.identity`.
+After a non-approval interaction resumes, `ctx.interaction_response` contains the normalized,
+runtime-validated `interaction_id`, `kind`, `prompt`, and `value`. It is absent on initial runs and
+approval resumes. Host tools can bind sequential draft resolution to this value instead of
+accepting an answer copied into model-controlled tool arguments. Such tools must declare
+`requires_interaction_response=True`; the Runtime hides them until a validated answer exists and
+clears the trusted answer after the first attempted invocation.
+
+Long-running tools can publish real intermediate state without another model step:
+
+```python
+await ctx.report_progress("Matched 3 of 12 places", public={"trip_changed": True})
+```
+
+Each call becomes a persisted `activity.updated` event with the tool call's stable progress ID.
+The SDK therefore replaces one running timeline row while the event log retains every update; a
+final update settles that row when the tool succeeds or fails. Keep the message public and concise;
+`public` follows the same frontend-only contract as `ToolResult.public`.
+
+The model receives an explicit `tool_status` envelope. A normal result is `success`; a result whose
+`data.ok` is `false`, a timeout, validation failure, or exception is `error`. Only explicit success
+envelopes participate in deduplication, so a corrected retry is never suppressed by an earlier
+failure.
+Rungent normalizes arguments and suppresses a repeated successful write/destructive/external call
+with the same tool name and arguments in one Run. The duplicate receives a successful tool result
+without executing business code. Set `deduplicate=False` only when repeating the exact operation is
+intentional; prefer one batch/count argument so intent remains explicit.
+
+## Runtime
+
+```python
+runtime = Runtime(
+    agents=[agent],
+    model=OpenAICompatibleModel.from_env(),
+    store=SQLAlchemyStore(sessionmaker),
+    max_model_steps=16,
+    model_wait_progress_after_seconds=3,
+    model_wait_progress_interval_seconds=5,
+    model_step_timeout_seconds=60,
+    model_step_total_timeout_seconds=150,
+    external_task_canceller=cancel_host_task,
+)
+```
+
+One Runtime may register several named agents, but most applications should begin with exactly one.
+`max_model_steps` bounds the complete Run, including model calls before and after interaction
+pause/resume cycles, and defaults to 16. The persisted `Run.model_steps` makes this limit and event
+step IDs monotonic. It is separate from provider transport retries: `OpenAICompatibleModel` retries
+transient failures inside the same step.
+
+```python
+model = OpenAICompatibleModel(
+    api_key="...",
+    base_url="https://api.openai.com/v1",
+    model="gpt-5-mini",
+    max_retries=3,
+    retry_backoff_seconds=0.5,
+    extra_body={"enable_thinking": False},
+)
+```
+
+The backoff is exponential and capped at eight seconds. HTTP 400-class errors other than 408 and
+429 are not retried. Environment construction also reads `LLM_MAX_RETRIES`,
+`LLM_RETRY_BACKOFF_SECONDS`, and `LLM_EXTRA_BODY`. The last value must be a JSON object and adds
+trusted provider-specific top-level fields without allowing overrides of Rungent's core request.

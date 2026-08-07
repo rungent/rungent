@@ -1,0 +1,73 @@
+# Python
+.venv/
+venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+
+# Docs / Next / Fumadocs
+.next/
+.turbo/
+.source/
+out/
+apps/docs/.next/
+apps/docs/.source/
+
+# Test & coverage (JS)
+coverage/
+*.lcov
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# Local / misc
+*.log
+tmp/
+temp/
+.cache/
+.direnv/

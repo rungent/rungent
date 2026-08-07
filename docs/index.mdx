@@ -1,0 +1,27 @@
+---
+title: Rungent
+description: A small, typed agent runtime embedded in your Python application.
+---
+
+Rungent supplies the infrastructure every product assistant otherwise reimplements: typed tool
+calling, the model/tool harness loop, sessions and runs, user input, deterministic approval gates,
+streaming events, persistence ports, and baseline evaluation.
+
+## Scope
+
+Rungent deliberately does **not** include a sidecar service, skill router, configuration console, or
+styled chat interface. An application imports the Python package, defines an Agent and tools, mounts
+the optional FastAPI router, and consumes events with the TypeScript SDK.
+
+## Design rules
+
+- Application code describes capabilities; Rungent owns orchestration.
+- Types generate model schemas and validate every call again at execution time.
+- Tool safety is explicit and enforced in code.
+- User clarification and operation approval are durable interactions.
+- Provider-specific model streams never cross the backend boundary.
+- Baseline behavior is testable without a real model and evaluable with one.
+
+Start with [Getting started](/docs/getting-started). AI coding agents should load
+[`/llms-full.txt`](/llms-full.txt) or read [AI reference](/docs/ai-reference).
+

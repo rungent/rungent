@@ -1,0 +1,47 @@
+---
+title: Getting started
+description: Install Rungent and run the smallest useful embedded agent.
+---
+
+## Install
+
+```bash
+pip install "rungent[fastapi,sqlalchemy]"
+npm install @rungent/sdk
+```
+
+## Define a tool and agent
+
+```python
+from typing import Annotated
+
+from rungent import Agent, ToolContext, ToolResult, tool
+
+
+@tool(effect="write", approval="never")
+async def move_place(
+    ctx: ToolContext,
+    name: Annotated[str, "Exact place name"],
+    day_number: Annotated[int | None, "Target day; null means unplanned"],
+) -> ToolResult:
+    """Move a place to a trip day."""
+    trips = ctx.deps["trips"]
+    await trips.move(ctx.resource["trip_id"], name, day_number)
+    return ToolResult(message=f"Moved {name}")
+
+
+agent = Agent(
+    name="trip_planner",
+    instructions="""
+    You update a trip itinerary. Use a tool for every factual change.
+    Ask for input when a place or target day is ambiguous.
+    """,
+    tools=[move_place],
+)
+```
+
+The first function parameter is runtime context and is hidden from the model. Remaining typed
+parameters become JSON Schema. Rungent rejects extra fields and invalid values before execution.
+
+Continue with [Python API](/docs/python-api) and [FastAPI integration](/docs/fastapi).
+

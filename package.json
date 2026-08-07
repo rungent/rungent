@@ -1,0 +1,12 @@
+{
+  "name": "rungent-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "dev:docs": "pnpm --filter @rungent/docs dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @rungent/sdk test"
+  }
+}
+

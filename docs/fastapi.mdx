@@ -1,0 +1,49 @@
+---
+title: FastAPI integration
+description: Mount Rungent directly inside an existing FastAPI application.
+---
+
+```python
+from fastapi import FastAPI, Request
+
+from rungent import Identity
+from rungent.fastapi import create_router
+
+
+async def resolve_identity(request: Request) -> Identity:
+    user = await current_user(request)
+    return Identity(subject_id=user.id, tenant_id=user.tenant_id)
+
+
+async def create_context(request, session, run):
+    return {
+        "trips": request.app.state.trip_service,
+        "db_sessionmaker": request.app.state.db_sessionmaker,
+    }
+
+
+app = FastAPI()
+app.include_router(
+    create_router(
+        runtime,
+        identity_resolver=resolve_identity,
+        context_factory=create_context,
+    ),
+    prefix="/api/assistant",
+)
+```
+
+Endpoints are intentionally resource-oriented:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/sessions` | Create an owned assistant session |
+| `GET` | `/sessions/{id}` | Load session messages |
+| `POST` | `/sessions/{id}/runs` | Create a detached Run; returns `202` and `run_id` |
+| `GET` | `/runs/{id}/events/stream` | Replay and follow events from `after_seq` |
+| `POST` | `/runs/{id}/responses` | Submit pending input and resume the Run |
+
+Always supply an identity resolver. A browser-supplied subject header is not authentication.
+Run creation accepts `Idempotency-Key`. A conflicting request returns
+`detail.code=active_run_conflict` with the active Run ID. Disconnecting the event stream never
+cancels execution.

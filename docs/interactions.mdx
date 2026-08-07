@@ -1,0 +1,142 @@
+---
+title: Interactions and approvals
+description: Pause, resume, and safely approve exact tool invocations.
+---
+
+## Missing information
+
+Rungent always exposes the built-in `request_input` model tool. It creates a durable `text`,
+`choice`, or `form` interaction and places the Run in `waiting_input`. A choice may set
+`multiple=true` and `allow_custom=true` independently.
+
+Text interactions submit a string. Choice interactions always submit one explicit response object:
+
+```json
+{
+  "selected": ["shibuya", "asakusa"],
+  "custom": "Kichijoji"
+}
+```
+
+For single choice, `selected` contains at most one ID and a custom answer is mutually exclusive.
+For multi-choice, selected IDs and custom text may coexist. Rungent rejects unknown IDs, duplicate
+IDs, empty answers, disallowed custom text, and multiple answers for a single-choice interaction.
+The frontend must collect multi-choice state locally and submit only when the user presses its
+explicit submit button; selecting one option must not resume the Run.
+
+Rungent adds the validated response as the result of the original `request_input` call and resumes
+the same Run. During that resumed drive, host tools also receive it as
+`ctx.interaction_response`; this trusted value includes the interaction ID and original prompt, so
+sequential workflows can prove they are consuming the current user answer rather than a value the
+model invented. A later response replaces it, and initial/approval drives expose no answer.
+
+## Tool-directed questions
+
+For deterministic business workflows, a host tool can return an `InteractionRequest` through
+`ToolResult.interaction`. The request freezes a continuation tool and validated arguments. The
+continuation must declare `requires_interaction_response=True`; Rungent invokes it directly after
+the user answers, without asking the model to recreate the question or route the answer.
+
+```python
+return ToolResult(
+    interaction=InteractionRequest(
+        kind="choice",
+        prompt="Which place did you mean?",
+        options=[{"id": "station", "label": "Kyoto Station"}],
+        allow_custom=True,
+        allow_skip=True,
+        skip_label="Skip this place",
+        continuation=ToolContinuation(
+            tool="resolve_place", arguments={"draft_id": draft.id}
+        ),
+    )
+)
+```
+
+A skipped choice submits `{selected: [], skipped: true}` and is mutually exclusive with selected
+or custom answers. Options may set `recommended=true`; clients should treat it as a presentation
+hint, not as permission to answer automatically. A continuation may return another interaction,
+creating a durable sequential workflow. Once no interaction is returned, the normal agent loop
+resumes.
+
+## Grouped questions
+
+Use one form when two to eight independent questions are already known. This reduces model turns
+and lets the user review and submit one coherent answer. Ask sequentially when a later question or
+its options depend on an earlier answer, or when one sensitive/high-effort question deserves its
+own context.
+
+```json
+{
+  "kind": "form",
+  "prompt": "Trip preferences",
+  "questions": [
+    {"id": "city", "kind": "text", "prompt": "Which city?"},
+    {
+      "id": "pace",
+      "kind": "choice",
+      "prompt": "Preferred pace?",
+      "options": [{"id": "slow", "label": "Slow"}, {"id": "fast", "label": "Fast"}]
+    }
+  ]
+}
+```
+
+The client renders every question in one card and submits once:
+
+```json
+{
+  "answers": {
+    "city": "Tokyo",
+    "pace": {"selected": ["slow"]}
+  }
+}
+```
+
+Question IDs are unique. Questions may be `text` or `choice` and may set `required=false`.
+Rungent validates every nested answer with the same rules as a standalone interaction.
+
+Rungent also exposes `report_progress(message)` for short public updates during multi-step work.
+The runtime validates its 280-character limit, records a public `activity.updated` event, and sends
+a normal tool result back to the model. Repeated host-tool updates share one stable activity ID, so
+the SDK replaces one row while persisted events retain the complete sequence. It has no business
+effect and never requires approval.
+Provider reasoning and hidden chain of thought are not progress and are never forwarded.
+Prompts should place progress calls alongside real business tool calls; a progress-only model step
+adds latency without advancing the task.
+
+Host-authored `RunActivity` covers the different case where a provider has not produced any stream
+event yet. It gives the product an immediate, factual status and Rungent refreshes that same
+persisted activity after three silent seconds and every five seconds. It must describe observable
+workflow state, not invent model reasoning.
+
+## Approval
+
+```python
+@tool(
+    effect="destructive",
+    approval="always",
+    title="Delete trip day",
+    confirmation="Delete day {day_number} and move its places to the unplanned pool?",
+)
+async def remove_day(ctx: ToolContext, day_number: int) -> ToolResult:
+    ...
+```
+
+Before execution Rungent freezes the tool name, validated arguments, call ID, and approval
+interaction. Approval executes that exact invocation. Rejection returns a structured rejection to
+the model. The model cannot silently regenerate different arguments after the user approves.
+
+Every `approval="always"` tool must declare `confirmation`. A format string receives validated,
+JSON-safe arguments. For a state-dependent impact preview, pass a sync or async callable with the
+same `ToolContext` plus tool arguments; Rungent evaluates it before persisting the approval:
+
+```python
+async def preview_clear_day(ctx: ToolContext, day_number: int) -> str:
+    names = await ctx.deps["trips"].place_names(ctx.resource["trip_id"], day_number)
+    return f"Delete all {len(names)} places from day {day_number}?\n" + "\n".join(names)
+```
+
+This is intentionally separate from asking the model to produce “Confirm / Cancel” choices.
+If argument validation or the confirmation callable fails, Rungent emits `tool.failed` and does not
+create an approval interaction.

@@ -1,0 +1,16 @@
+{
+  "title": "Rungent",
+  "pages": [
+    "index",
+    "architecture",
+    "getting-started",
+    "python-api",
+    "fastapi",
+    "interactions",
+    "persistence",
+    "frontend",
+    "baseline",
+    "roasea",
+    "ai-reference"
+  ]
+}

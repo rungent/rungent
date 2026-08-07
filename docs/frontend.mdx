@@ -1,0 +1,100 @@
+---
+title: Frontend SDK
+description: Consume Rungent streams without adopting a prescribed chat interface.
+---
+
+```bash
+npm install @rungent/sdk
+```
+
+```ts
+import {
+  RungentClient,
+  failRungentState,
+  initialRungentState,
+  reduceRungentEvent,
+} from '@rungent/sdk';
+
+const client = new RungentClient({ baseUrl: '/api/assistant' });
+const session = await client.createSession({ resource: { trip_id: tripId } });
+
+let state = initialRungentState;
+const run = await client.createRun(session.id, 'Move Asakusa to day 2', {
+  idempotencyKey: crypto.randomUUID(),
+});
+await client.streamRunEvents(run.run_id, state.lastSeq ?? 0, {
+  signal: abortController.signal,
+  onEvent(event) {
+    state = reduceRungentEvent(state, event);
+    render(state);
+  },
+});
+```
+
+When `state.interaction` exists, render text input, choice controls, or approval buttons according
+to its `kind`. For `choice`, use `multiple` to choose radio-like or checkbox-like controls and show
+a free-text field when `allow_custom` is true. Submit a `ChoiceResponse` object only after explicit
+multi-select confirmation:
+
+```ts
+await client.respond(runId, interaction.id, {
+  selected: ['shibuya', 'asakusa'],
+  custom: 'Kichijoji',
+});
+await client.streamRunEvents(runId, state.lastSeq ?? 0, { onEvent });
+```
+
+For `form`, render every `interaction.questions` item in one card, keep all answers locally, and
+resume only from one explicit submit button:
+
+```ts
+await client.respond(runId, interaction.id, {
+  answers: {
+    city: 'Tokyo',
+    pace: { selected: ['slow'] },
+  },
+}, { onEvent });
+```
+
+During an automatic provider retry, the reducer clears incomplete output and keeps the model
+activity running with `retry`, `maxRetries`, and `retryReason`. Render progress such as
+“Network interrupted, retrying 1/3…”; no user message is required.
+
+Use `failRungentState(state, message)` when the HTTP/SSE transport itself throws before a terminal
+event. Both it and `run.failed` settle every running model/tool/interaction activity so the UI does
+not retain stale spinners.
+
+Bounded-loop exhaustion emits `run.failed` with `code=model_step_limit_exceeded`, a safe public
+message, and `retryable=true`. The SDK exposes these as `state.errorCode` and `state.retryable` so
+products can render localized recovery guidance; the configured numeric limit remains internal.
+
+Cancel an in-flight `run` or `respond` by calling `await client.cancel(runId)`, then abort its
+supplied `AbortSignal` to close the client stream. The cancel endpoint terminates the active drive
+and persists a `run.cancelled` terminal event; using `AbortSignal` alone cannot reliably notify an
+HTTP server after the connection disappears. The reducer projects the event as
+`state.status === 'cancelled'` rather than conflating it with failure, and replay restores it.
+
+`state.activities` is an ordered union of model, progress, tool, interaction, and external-task
+activity. A deferred tool projects `state.status === 'waiting_external'`; poll persisted events with
+`listEvents(runId, state.lastSeq)` while no SSE request is open, and keep cancel available. External
+task progress updates one stable activity until completion. Progress
+activity may be `running`, `completed`, or `failed`; repeated events with the same ID update one
+timeline entry, and terminal events settle a running progress entry. Keep the
+timeline expanded while running or waiting, keep failures expanded, and collapse it only
+after `state.status === 'completed'`. This collapse preference belongs to the product UI, not the
+SDK. Tool activity exposes only safe `message` and optional `public` data; use stable tool names for
+application-specific labels and icons.
+Deduplicated non-read calls appear as completed tool activities with `deduplicated=true` and a safe
+message; they never execute host business code.
+Tool activities also expose a stable optional `code`. Product UIs should hide or localize technical
+validation failures such as `invalid_arguments` instead of rendering framework English verbatim.
+
+Persisted public events can be replayed without parsing SSE:
+
+```ts
+const events = await client.listEvents(runId, lastSeq);
+state = events.reduce(reduceRungentEvent, state);
+```
+
+Rungent intentionally ships no styled drawer, dock, or message components. Existing products keep
+their own design system while sharing the protocol client and state transition logic.
