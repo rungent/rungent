@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from .state import ToolCall
 from .tools import Tool, ToolContext
@@ -67,7 +65,7 @@ class Agent:
         run_activity: RunActivityProvider | None = None,
         run_initializer: RunInitializer | None = None,
         model: str | None = None,
-    ) -> Agent:
+    ) -> Self:
         path = Path(instructions)
         return cls(
             name=name,

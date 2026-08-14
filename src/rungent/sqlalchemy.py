@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -21,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from .acs import Event
-from .state import Message, Run, RunStatus, Session, now
+from .state import Identity, Message, Run, RunStatus, Session, now
 
 
 class RungentBase(DeclarativeBase):
@@ -35,6 +33,7 @@ class SessionRow(RungentBase):
     agent_name: Mapped[str] = mapped_column(String(128), nullable=False)
     subject_id: Mapped[str] = mapped_column(String(256), index=True, nullable=False)
     tenant_id: Mapped[str | None] = mapped_column(String(256), index=True)
+    title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     resource: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -105,15 +104,47 @@ class SQLAlchemyStore:
             row = await db.get(SessionRow, session_id)
             if row is None:
                 raise KeyError(f"Unknown session: {session_id}")
-            return Session(
-                id=row.id,
-                agent_name=row.agent_name,
-                subject_id=row.subject_id,
-                tenant_id=row.tenant_id,
-                resource=row.resource,
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-            )
+            return self._session_from_row(row)
+
+    async def list_sessions(self, identity: Identity) -> Sequence[Session]:
+        async with self.sessions() as db:
+            rows = (
+                await db.execute(
+                    select(SessionRow)
+                    .where(
+                        SessionRow.subject_id == identity.subject_id,
+                        SessionRow.tenant_id == identity.tenant_id,
+                    )
+                    .order_by(SessionRow.updated_at.desc(), SessionRow.id.desc())
+                )
+            ).scalars()
+            return [self._session_from_row(row) for row in rows]
+
+    async def save_session(self, session: Session) -> None:
+        async with self.sessions.begin() as db:
+            row = await db.get(SessionRow, session.id)
+            if row is None:
+                raise KeyError(f"Unknown session: {session.id}")
+            session.updated_at = now()
+            row.agent_name = session.agent_name
+            row.subject_id = session.subject_id
+            row.tenant_id = session.tenant_id
+            row.title = session.title
+            row.resource = session.resource
+            row.updated_at = session.updated_at
+
+    @staticmethod
+    def _session_from_row(row: SessionRow) -> Session:
+        return Session(
+            id=row.id,
+            agent_name=row.agent_name,
+            subject_id=row.subject_id,
+            tenant_id=row.tenant_id,
+            title=row.title,
+            resource=row.resource,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
 
     async def append_message(self, session_id: str, message: Message) -> None:
         payload = message.model_dump(mode="json")

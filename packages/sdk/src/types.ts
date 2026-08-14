@@ -75,6 +75,7 @@ export interface Session {
   readonly agent_name: string;
   readonly subject_id: string;
   readonly tenant_id?: string | null;
+  readonly title?: string | null;
   readonly resource: Record<string, unknown>;
   readonly created_at: string;
   readonly updated_at: string;

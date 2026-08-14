@@ -1,7 +1,5 @@
 """Persistent runtime state shared by the harness, stores, and transports."""
 
-from __future__ import annotations
-
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -74,9 +72,18 @@ class Session(BaseModel):
     agent_name: str
     subject_id: str
     tenant_id: str | None = None
+    title: str | None = None
     resource: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now)
     updated_at: datetime = Field(default_factory=now)
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.title is None:
+            return
+        title = self.title.strip()
+        if not title or len(title) > 200:
+            raise ValueError("Session title must contain 1 to 200 characters")
+        self.title = title
 
 
 class InteractionOption(BaseModel):

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 from collections import defaultdict
 from collections.abc import Sequence
@@ -7,13 +5,17 @@ from datetime import timedelta
 from typing import Protocol
 
 from .acs import Event
-from .state import Message, Run, RunStatus, Session, now
+from .state import Identity, Message, Run, RunStatus, Session, now
 
 
 class Store(Protocol):
     async def create_session(self, session: Session) -> None: ...
 
     async def get_session(self, session_id: str) -> Session: ...
+
+    async def list_sessions(self, identity: Identity) -> Sequence[Session]: ...
+
+    async def save_session(self, session: Session) -> None: ...
 
     async def append_message(self, session_id: str, message: Message) -> None: ...
 
@@ -72,6 +74,22 @@ class MemoryStore:
         if session is None:
             raise KeyError(f"Unknown session: {session_id}")
         return session.model_copy(deep=True)
+
+    async def list_sessions(self, identity: Identity) -> Sequence[Session]:
+        matches = [
+            session.model_copy(deep=True)
+            for session in self.sessions.values()
+            if session.subject_id == identity.subject_id and session.tenant_id == identity.tenant_id
+        ]
+        matches.sort(key=lambda session: (session.updated_at, session.id), reverse=True)
+        return matches
+
+    async def save_session(self, session: Session) -> None:
+        async with self._lock:
+            if session.id not in self.sessions:
+                raise KeyError(f"Unknown session: {session.id}")
+            session.updated_at = now()
+            self.sessions[session.id] = session.model_copy(deep=True)
 
     async def append_message(self, session_id: str, message: Message) -> None:
         async with self._lock:

@@ -103,14 +103,16 @@ from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_base
 ## HTTP contract
 
 ```text
-POST /sessions
-GET  /sessions/{session_id}
-GET  /sessions/{session_id}/runs
-POST /sessions/{session_id}/runs
-GET  /runs/{run_id}/events?after_seq={seq}
-GET  /runs/{run_id}/events/stream?after_seq={seq}
-POST /runs/{run_id}/responses
-POST /runs/{run_id}/cancel
+POST   /sessions
+GET    /sessions
+PATCH  /sessions/{session_id}
+GET    /sessions/{session_id}
+GET    /sessions/{session_id}/runs
+POST   /sessions/{session_id}/runs
+GET    /runs/{run_id}/events?after_seq={seq}
+GET    /runs/{run_id}/events/stream?after_seq={seq}
+POST   /runs/{run_id}/responses
+POST   /runs/{run_id}/cancel
 ```
 
 ## ACS envelope

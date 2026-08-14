@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -53,7 +51,7 @@ class BaselineCase:
     interaction_match: Literal["exact", "contains"] = "exact"
     responses: tuple[Any, ...] = ()
     expected_status: RunStatus = RunStatus.COMPLETED
-    assert_state: BaselineAssertion | None = None
+    assert_state: "BaselineAssertion | None" = None
 
 
 @dataclass(frozen=True, slots=True)

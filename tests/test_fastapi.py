@@ -44,6 +44,13 @@ async def test_fastapi_router_exposes_session_and_stream_contract():
             "user",
             "assistant",
         ]
+        titled = await client.patch(
+            f"/assistant/sessions/{session_id}", json={"title": "Tokyo trip"}
+        )
+        assert titled.json()["title"] == "Tokyo trip"
+        listed = await client.get("/assistant/sessions")
+        assert [item["id"] for item in listed.json()] == [session_id]
+        assert listed.json()[0]["title"] == "Tokyo trip"
 
 
 async def test_fastapi_cancel_endpoint_persists_terminal_event():

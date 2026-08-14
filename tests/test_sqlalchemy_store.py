@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from rungent.acs import EventEmitter
 from rungent.sqlalchemy import RungentBase, SQLAlchemyStore
-from rungent.state import Message, Run, RunStatus, Session
+from rungent.state import Identity, Message, Run, RunStatus, Session
 
 
 async def test_sqlalchemy_store_round_trip():
@@ -32,6 +32,12 @@ async def test_sqlalchemy_store_round_trip():
     assert [item.id for item in await store.list_events(run.id)] == [event.id]
     assert [item.id for item in await store.list_runs(session.id)] == [run.id]
     assert await store.find_active_run(session.id) is None
+    session.title = "Tokyo"
+    await store.save_session(session)
+    listed = await store.list_sessions(Identity(subject_id="user"))
+    assert [item.id for item in listed] == [session.id]
+    assert listed[0].title == "Tokyo"
+    assert await store.list_sessions(Identity(subject_id="other")) == []
     await engine.dispose()
 
 

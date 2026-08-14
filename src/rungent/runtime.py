@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import inspect
 import json
@@ -119,6 +117,7 @@ class Runtime:
         *,
         identity: Identity,
         agent_name: str | None = None,
+        title: str | None = None,
         resource: Mapping[str, Any] | None = None,
     ) -> Session:
         selected = agent_name or self.default_agent
@@ -128,6 +127,7 @@ class Runtime:
             agent_name=selected,
             subject_id=identity.subject_id,
             tenant_id=identity.tenant_id,
+            title=title,
             resource=dict(resource or {}),
         )
         await self.store.create_session(session)
@@ -144,6 +144,18 @@ class Runtime:
         session = await self.store.get_session(session_id)
         self._authorize(session, identity)
         return session, list(await self.store.list_messages(session_id))
+
+    async def list_sessions(self, *, identity: Identity) -> list[Session]:
+        return list(await self.store.list_sessions(identity))
+
+    async def set_session_title(
+        self, session_id: str, title: str | None, *, identity: Identity
+    ) -> Session:
+        session = await self.store.get_session(session_id)
+        self._authorize(session, identity)
+        updated = session.model_copy(update={"title": None if title is None else title})
+        await self.store.save_session(updated)
+        return updated
 
     async def get_run_events(
         self,

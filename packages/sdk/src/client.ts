@@ -9,7 +9,12 @@ export interface RungentClientOptions {
 
 export interface CreateSessionInput {
   readonly agent?: string;
+  readonly title?: string | null;
   readonly resource?: Record<string, unknown>;
+}
+
+export interface UpdateSessionInput {
+  readonly title?: string | null;
 }
 
 export interface StreamOptions {
@@ -69,6 +74,17 @@ export class RungentClient {
 
   async createSession(input: CreateSessionInput = {}): Promise<Session> {
     return this.json('/sessions', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async listSessions(): Promise<readonly Session[]> {
+    return this.json('/sessions');
+  }
+
+  async updateSession(sessionId: string, input: UpdateSessionInput): Promise<Session> {
+    return this.json(`/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    });
   }
 
   async getSession(sessionId: string): Promise<Session> {

@@ -24,6 +24,8 @@ This is the canonical short context for an AI coding agent integrating Rungent.
 6. Use the FastAPI router from `rungent.fastapi` when exposing the assistant over HTTP. Run
    creation returns `202` with a Run ID; subscribe separately so disconnecting the event stream
    never cancels execution. Pass `Idempotency-Key` when a client may retry creation.
+   `GET /sessions` lists the caller's sessions newest first. Hosts set `Session.title` with
+   `Runtime.set_session_title` or `PATCH /sessions/{id}` after the first Run.
 7. Consume the SSE stream with `@rungent/sdk`. Do not parse provider-specific model chunks in the
    frontend.
 8. Use `request_input` for missing information. Group two to eight independent, already-known

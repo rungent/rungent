@@ -38,6 +38,8 @@ Endpoints are intentionally resource-oriented:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/sessions` | Create an owned assistant session |
+| `GET` | `/sessions` | List sessions for the current identity, newest first |
+| `PATCH` | `/sessions/{id}` | Set or clear the session title |
 | `GET` | `/sessions/{id}` | Load session messages |
 | `POST` | `/sessions/{id}/runs` | Create a detached Run; returns `202` and `run_id` |
 | `GET` | `/runs/{id}/events/stream` | Replay and follow events from `after_seq` |

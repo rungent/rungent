@@ -31,6 +31,25 @@ describe('RungentClient detached Run contract', () => {
     expect(events).toEqual(['run.completed']);
   });
 
+  it('lists and titles sessions', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json([{ id: 's1', title: 'Tokyo', agent_name: 'trip' }]))
+      .mockResolvedValueOnce(Response.json({ id: 's1', title: 'Kyoto' }));
+    const client = new RungentClient({ baseUrl: '/assistant', fetch: fetcher });
+
+    await expect(client.listSessions()).resolves.toEqual([
+      { id: 's1', title: 'Tokyo', agent_name: 'trip' },
+    ]);
+    await expect(client.updateSession('s1', { title: 'Kyoto' })).resolves.toEqual({
+      id: 's1',
+      title: 'Kyoto',
+    });
+    expect(fetcher.mock.calls[0]?.[0]).toBe('/assistant/sessions');
+    expect(fetcher.mock.calls[1]?.[0]).toBe('/assistant/sessions/s1');
+    expect(fetcher.mock.calls[1]?.[1]).toMatchObject({ method: 'PATCH' });
+  });
+
   it('preserves structured active Run conflicts', async () => {
     const detail = {
       detail: { code: 'active_run_conflict', run_id: 'run-active', status: 'running' },

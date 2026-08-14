@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
@@ -20,7 +18,12 @@ ContextFactory = Callable[
 
 class CreateSessionRequest(BaseModel):
     agent: str | None = None
+    title: str | None = None
     resource: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateSessionRequest(BaseModel):
+    title: str | None = None
 
 
 class CreateRunRequest(BaseModel):
@@ -76,7 +79,28 @@ def create_router(
             session = await runtime.create_session(
                 identity=await identity(request),
                 agent_name=body.agent,
+                title=body.title,
                 resource=body.resource,
+            )
+            return session.model_dump(mode="json")
+        except Exception as exc:
+            raise translate_error(exc) from exc
+
+    @router.get("/sessions")
+    async def list_sessions(request: Request):
+        try:
+            sessions = await runtime.list_sessions(identity=await identity(request))
+            return [session.model_dump(mode="json") for session in sessions]
+        except Exception as exc:
+            raise translate_error(exc) from exc
+
+    @router.patch("/sessions/{session_id}")
+    async def update_session(session_id: str, body: UpdateSessionRequest, request: Request):
+        try:
+            session = await runtime.set_session_title(
+                session_id,
+                body.title,
+                identity=await identity(request),
             )
             return session.model_dump(mode="json")
         except Exception as exc:

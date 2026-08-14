@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 import httpx
 
@@ -90,7 +90,7 @@ class OpenAICompatibleModel:
         self._client = client
 
     @classmethod
-    def from_env(cls) -> OpenAICompatibleModel:
+    def from_env(cls) -> Self:
         raw_extra_body = os.environ.get("LLM_EXTRA_BODY", "").strip()
         extra_body: dict[str, Any] = {}
         if raw_extra_body:
