@@ -18,7 +18,7 @@ from rungent import (
     tool,
 )
 from rungent.llm import ModelCompleted, ModelEvent, ModelRetrying, TextDelta
-from rungent.state import InteractionOption, RunStatus, ToolCall
+from rungent.state import InteractionOption, InteractionQuestion, RunStatus, ToolCall
 from rungent.store import MemoryStore
 from rungent.testing import ScriptedModel
 
@@ -549,6 +549,76 @@ async def test_tool_directed_interactions_run_frozen_continuations_without_model
     assert final[-1].type == "run.completed"
     assert next(event for event in final if event.type == "model.started").data["step"] == 2
     assert answers == [{"selected": [], "skipped": True}, {"selected": ["b"]}]
+
+
+async def test_approved_write_can_pause_for_a_continuation_form():
+    seen: list[str] = []
+
+    @tool(
+        effect="write",
+        approval="never",
+        requires_interaction_response=True,
+    )
+    async def complete_create(ctx: ToolContext, name: str) -> ToolResult:
+        """Finish the approved create after the user supplies an owner."""
+        assert ctx.interaction_response is not None
+        seen.append(f"{name}:{ctx.interaction_response.value['answers']['owner']}")
+        return ToolResult(message="created")
+
+    @tool(
+        effect="write",
+        approval="always",
+        confirmation="Create {name}?",
+    )
+    async def create_item(ctx: ToolContext, name: str) -> ToolResult:
+        """Create one item after approval."""
+        return ToolResult(
+            message="need owner",
+            interaction=InteractionRequest(
+                kind="form",
+                prompt="Who owns it?",
+                questions=[
+                    InteractionQuestion(id="owner", prompt="Owner", kind="text"),
+                ],
+                continuation=ToolContinuation(tool="complete_create", arguments={"name": name}),
+            ),
+        )
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(tool_calls=[ToolCall(id="c1", name="create_item", arguments={"name": "box"})]),
+            ModelCompleted(text="Created"),
+        ],
+        tools=[create_item, complete_create],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    first = await collect(
+        runtime.stream_run(session_id=session.id, content="Create box", identity=identity)
+    )
+    approval = first[-1]
+    after_approve = await collect(
+        runtime.stream_response(
+            run_id=approval.run_id,
+            response=InteractionResponse(interaction_id=approval.data["id"], value="approve"),
+            identity=identity,
+        )
+    )
+    assert after_approve[-1].type == "interaction.requested"
+    assert after_approve[-1].data["kind"] == "form"
+    assert not any(event.type == "model.started" for event in after_approve)
+    final = await collect(
+        runtime.stream_response(
+            run_id=approval.run_id,
+            response=InteractionResponse(
+                interaction_id=after_approve[-1].data["id"],
+                value={"answers": {"owner": "ada"}},
+            ),
+            identity=identity,
+        )
+    )
+    assert final[-1].type == "run.completed"
+    assert seen == ["box:ada"]
 
 
 async def test_choice_skip_is_rejected_unless_the_interaction_allows_it():

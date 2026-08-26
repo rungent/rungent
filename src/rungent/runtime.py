@@ -824,6 +824,8 @@ class Runtime:
                             ),
                         )
                     drive_response = None
+                    if run.status == RunStatus.WAITING_INPUT:
+                        return
                 elif pending.kind == "continuation":
                     assert trusted_response is not None
                     tool = self.agents[session.agent_name].tool_map()[call.name]
