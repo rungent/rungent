@@ -586,7 +586,9 @@ async def test_approved_write_can_pause_for_a_continuation_form():
 
     runtime = runtime_with(
         [
-            ModelCompleted(tool_calls=[ToolCall(id="c1", name="create_item", arguments={"name": "box"})]),
+            ModelCompleted(
+                tool_calls=[ToolCall(id="c1", name="create_item", arguments={"name": "box"})]
+            ),
             ModelCompleted(text="Created"),
         ],
         tools=[create_item, complete_create],
