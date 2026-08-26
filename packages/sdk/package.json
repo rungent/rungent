@@ -1,6 +1,6 @@
 {
   "name": "@rungent/sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Headless TypeScript SDK for Rungent sessions, runs, interactions, and ACS",
   "type": "module",
   "license": "Apache-2.0",

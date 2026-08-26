@@ -1,6 +1,6 @@
 [project]
 name = "rungent"
-version = "0.2.0"
+version = "0.2.1"
 description = "A small, typed agent runtime for Python applications"
 readme = "README.md"
 license = "Apache-2.0"
