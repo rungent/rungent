@@ -448,7 +448,10 @@ class Runtime:
                     return existing
             active = await self.store.find_active_run(session.id)
             if active is not None:
-                raise ActiveRunConflict(active)
+                if active.status is RunStatus.WAITING_INPUT:
+                    await self.cancel_run(active.id, identity=identity)
+                else:
+                    raise ActiveRunConflict(active)
             await self.store.append_message(session.id, Message(role="user", content=content))
             run = Run(
                 session_id=session.id,
@@ -689,7 +692,10 @@ class Runtime:
         async with self._session_locks[session.id]:
             active = await self.store.find_active_run(session.id)
             if active is not None:
-                raise ValueError(f"Session already has an active run: {active.id}")
+                if active.status is RunStatus.WAITING_INPUT:
+                    await self.cancel_run(active.id, identity=identity)
+                else:
+                    raise ActiveRunConflict(active)
             await self.store.append_message(session.id, Message(role="user", content=content))
             run = Run(session_id=session.id, status=RunStatus.RUNNING, input=content)
             await self.store.create_run(run)

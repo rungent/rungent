@@ -1102,6 +1102,54 @@ async def test_approval_executes_frozen_arguments_only_after_acceptance():
     ]
 
 
+async def test_new_message_cancels_waiting_approval_without_executing():
+    calls: list[tuple[str, int]] = []
+
+    @tool(
+        effect="destructive",
+        approval="always",
+        confirmation="Delete day {day} from trip {trip_id}?",
+    )
+    async def delete_day(
+        ctx: ToolContext,
+        trip_id: Annotated[str, "Trip id"],
+        day: Annotated[int, "Day number"],
+    ) -> ToolResult:
+        """Delete one day from a trip."""
+        calls.append((trip_id, day))
+        return ToolResult(data={"deleted": day})
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(
+                tool_calls=[
+                    ToolCall(
+                        id="del",
+                        name="delete_day",
+                        arguments={"trip_id": "trip-1", "day": 3},
+                    )
+                ]
+            ),
+            ModelCompleted(text="Acknowledged"),
+        ],
+        [delete_day],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    first = await collect(
+        runtime.stream_run(session_id=session.id, content="Delete day 3", identity=identity)
+    )
+    assert first[-1].type == "interaction.requested"
+    second = await collect(
+        runtime.stream_run(session_id=session.id, content="确认", identity=identity)
+    )
+    assert calls == []
+    cancelled = await runtime.store.get_run(first[-1].run_id)
+    assert cancelled.status == RunStatus.CANCELLED
+    assert second[-1].type == "run.completed"
+    assert second[-1].run_id != first[-1].run_id
+
+
 async def test_invalid_destructive_arguments_do_not_request_approval():
     @tool(effect="destructive", approval="always", confirmation="Remove day {day}?")
     async def remove_day(ctx: ToolContext, day: int) -> ToolResult:
