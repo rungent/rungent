@@ -996,7 +996,7 @@ async def test_choice_response_rejects_unknown_or_implicit_values():
             raise AssertionError(f"invalid choice response was accepted: {value!r}")
 
 
-async def test_session_rejects_a_second_run_while_waiting_for_input():
+async def test_session_cancels_waiting_input_when_a_new_run_starts():
     runtime = runtime_with(
         [
             ModelCompleted(
@@ -1007,19 +1007,23 @@ async def test_session_rejects_a_second_run_while_waiting_for_input():
                         arguments={"kind": "text", "prompt": "Which city?"},
                     )
                 ]
-            )
+            ),
+            ModelCompleted(text="New request"),
         ]
     )
     identity = Identity(subject_id="u1")
     session = await runtime.create_session(identity=identity)
-    await collect(runtime.stream_run(session_id=session.id, content="Plan", identity=identity))
-
-    try:
-        await collect(runtime.stream_run(session_id=session.id, content="Again", identity=identity))
-    except ValueError as exc:
-        assert "active run" in str(exc)
-    else:
-        raise AssertionError("a second active run was accepted")
+    first = await collect(
+        runtime.stream_run(session_id=session.id, content="Plan", identity=identity)
+    )
+    assert first[-1].type == "interaction.requested"
+    second = await collect(
+        runtime.stream_run(session_id=session.id, content="Again", identity=identity)
+    )
+    cancelled = await runtime.store.get_run(first[-1].run_id)
+    assert cancelled.status == RunStatus.CANCELLED
+    assert second[-1].type == "run.completed"
+    assert second[-1].run_id != first[-1].run_id
 
 
 async def test_empty_model_completion_is_retried_instead_of_returned_to_user():
