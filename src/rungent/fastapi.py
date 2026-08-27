@@ -119,6 +119,20 @@ def create_router(
         except Exception as exc:
             raise translate_error(exc) from exc
 
+    @router.get("/sessions/{session_id}/context-usage")
+    async def get_context_usage(session_id: str, request: Request):
+        try:
+            resolved_identity = await identity(request)
+            session, _ = await runtime.get_session(session_id, identity=resolved_identity)
+            resolved_deps = await deps(request, session)
+            return await runtime.get_context_usage(
+                session_id,
+                identity=resolved_identity,
+                deps=resolved_deps,
+            )
+        except Exception as exc:
+            raise translate_error(exc) from exc
+
     @router.get("/sessions/{session_id}/runs")
     async def list_runs(session_id: str, request: Request):
         try:

@@ -97,8 +97,8 @@ from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_base
 - Frontends consume ACS through `@rungent/sdk`.
 - Terminal events settle unfinished activities; call SDK `failRungentState` for transport failures.
 - Every integration ships deterministic and real-model baseline cases.
-- `OpenAICompatibleModel(extra_body=...)` adds trusted provider-specific top-level request fields;
-  `LLM_EXTRA_BODY` accepts the same value as a JSON object and cannot override core request fields.
+- `OpenAICompatibleModel(extra_body=...)` adds trusted provider-specific top-level request fields
+  and cannot override core request fields.
 
 ## HTTP contract
 

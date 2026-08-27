@@ -131,7 +131,11 @@ intentional; prefer one batch/count argument so intent remains explicit.
 ```python
 runtime = Runtime(
     agents=[agent],
-    model=OpenAICompatibleModel.from_env(),
+    model=OpenAICompatibleModel(
+        api_key="...",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5-mini",
+    ),
     store=SQLAlchemyStore(sessionmaker),
     max_model_steps=16,
     model_wait_progress_after_seconds=3,
@@ -160,6 +164,5 @@ model = OpenAICompatibleModel(
 ```
 
 The backoff is exponential and capped at eight seconds. HTTP 400-class errors other than 408 and
-429 are not retried. Environment construction also reads `LLM_MAX_RETRIES`,
-`LLM_RETRY_BACKOFF_SECONDS`, and `LLM_EXTRA_BODY`. The last value must be a JSON object and adds
-trusted provider-specific top-level fields without allowing overrides of Rungent's core request.
+429 are not retried. Pass `extra_body` for trusted provider-specific top-level fields; it cannot
+override Rungent's core request.

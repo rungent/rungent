@@ -98,11 +98,15 @@ async def test_model_wait_progress_is_immediate_persisted_and_reuses_one_activit
 
     started = await anext(stream)
     initial = await anext(stream)
+    usage = await anext(stream)
     model_started = await anext(stream)
     waiting = await asyncio.wait_for(anext(stream), timeout=0.2)
     long_waiting = await asyncio.wait_for(anext(stream), timeout=0.2)
 
     assert started.type == "run.started"
+    assert usage.type == "context.usage"
+    assert usage.data["source"] == "estimated"
+    assert usage.data["used_tokens"] > 0
     assert initial.type == waiting.type == long_waiting.type == "activity.updated"
     assert initial.data["id"] == waiting.data["id"] == long_waiting.data["id"]
     assert initial.data["status"] == "running"
@@ -157,6 +161,7 @@ async def test_plain_response_completes_run_and_persists_messages():
 
     assert [event.type for event in events] == [
         "run.started",
+        "context.usage",
         "model.started",
         "message.delta",
         "model.completed",
@@ -1098,6 +1103,7 @@ async def test_approval_executes_frozen_arguments_only_after_acceptance():
         "interaction.resolved",
         "tool.started",
         "tool.completed",
+        "context.usage",
         "model.started",
         "message.delta",
         "model.completed",
@@ -1561,6 +1567,7 @@ async def test_model_retry_resets_partial_output_and_keeps_same_model_step():
 
     assert [event.type for event in events] == [
         "run.started",
+        "context.usage",
         "model.started",
         "message.delta",
         "message.reset",
@@ -1791,3 +1798,54 @@ async def test_deferred_completion_can_request_a_runtime_owned_interaction():
         "run.waiting_input",
         "interaction.requested",
     ]
+
+
+async def test_get_context_usage_estimates_assembled_prompt():
+    async def current_user(ctx: ToolContext) -> str:
+        return f"user={ctx.identity.subject_id}"
+
+    runtime = Runtime(
+        agents=[
+            Agent(
+                name="assistant",
+                instructions="You are a console assistant.",
+                context=current_user,
+            )
+        ],
+        model=ScriptedModel([]),
+        store=MemoryStore(),
+        context_budget_tokens=12_000,
+    )
+    identity = Identity(subject_id="alice")
+    session = await runtime.create_session(identity=identity)
+    usage = await runtime.get_context_usage(session.id, identity=identity)
+    assert usage["budget_tokens"] == 12_000
+    assert usage["used_tokens"] > 0
+    assert usage["source"] == "estimated"
+    assert {item["id"] for item in usage["categories"]} >= {
+        "instructions",
+        "runtime",
+        "context",
+        "tool_definitions",
+    }
+
+
+async def test_drive_emits_estimated_then_provider_context_usage():
+    runtime = Runtime(
+        agents=[Agent(name="assistant", instructions="Reply")],
+        model=ScriptedModel(
+            [ModelCompleted(text="Hello", usage={"prompt_tokens": 80, "completion_tokens": 4})]
+        ),
+        store=MemoryStore(),
+        context_budget_tokens=200,
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Hi", identity=identity)
+    )
+    usages = [event for event in events if event.type == "context.usage"]
+    assert [event.data["source"] for event in usages] == ["estimated", "provider"]
+    assert usages[1].data["used_tokens"] == 80
+    assert usages[1].data["prompt_tokens"] == 80
+    assert usages[1].data["budget_tokens"] == 200

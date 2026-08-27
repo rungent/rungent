@@ -1,13 +1,10 @@
 """LLM streaming protocol and the built-in OpenAI-compatible transport."""
 
-from __future__ import annotations
-
 import asyncio
 import json
-import os
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, Self
+from typing import Any, Protocol
 
 import httpx
 
@@ -89,24 +86,6 @@ class OpenAICompatibleModel:
             raise ValueError(f"extra_body cannot override {sorted(overlap)[0]}")
         self._client = client
 
-    @classmethod
-    def from_env(cls) -> Self:
-        raw_extra_body = os.environ.get("LLM_EXTRA_BODY", "").strip()
-        extra_body: dict[str, Any] = {}
-        if raw_extra_body:
-            parsed = json.loads(raw_extra_body)
-            if not isinstance(parsed, dict):
-                raise ValueError("LLM_EXTRA_BODY must be a JSON object")
-            extra_body = parsed
-        return cls(
-            api_key=os.environ.get("LLM_API_KEY", ""),
-            base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
-            model=os.environ.get("LLM_MODEL_ID", "gpt-5-mini"),
-            max_retries=int(os.environ.get("LLM_MAX_RETRIES", "3")),
-            retry_backoff_seconds=float(os.environ.get("LLM_RETRY_BACKOFF_SECONDS", "0.5")),
-            extra_body=extra_body,
-        )
-
     @staticmethod
     def _retry_reason(exc: Exception) -> str | None:
         if isinstance(exc, httpx.TimeoutException):
@@ -131,7 +110,7 @@ class OpenAICompatibleModel:
         model: str | None = None,
     ) -> AsyncIterator[ModelEvent]:
         if not self.api_key:
-            raise RuntimeError("LLM_API_KEY is not configured")
+            raise RuntimeError("api_key is not configured")
         owns_client = self._client is None
         client = self._client or httpx.AsyncClient(timeout=self.timeout_seconds)
         payload = {

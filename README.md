@@ -39,7 +39,11 @@ agent = Agent(
 
 runtime = Runtime(
     agents=[agent],
-    model=OpenAICompatibleModel.from_env(),
+    model=OpenAICompatibleModel(
+        api_key="...",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5-mini",
+    ),
     store=MemoryStore(),
 )
 ```

@@ -50,6 +50,21 @@ describe('RungentClient detached Run contract', () => {
     expect(fetcher.mock.calls[1]?.[1]).toMatchObject({ method: 'PATCH' });
   });
 
+  it('loads session context usage', async () => {
+    const usage = {
+      budget_tokens: 80000,
+      used_tokens: 1200,
+      used_percent: 2,
+      categories: [{ id: 'instructions', label: 'Instructions', tokens: 1200 }],
+      source: 'estimated',
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(usage));
+    const client = new RungentClient({ baseUrl: '/assistant', fetch: fetcher });
+
+    await expect(client.getContextUsage('s1')).resolves.toEqual(usage);
+    expect(fetcher.mock.calls[0]?.[0]).toBe('/assistant/sessions/s1/context-usage');
+  });
+
   it('preserves structured active Run conflicts', async () => {
     const detail = {
       detail: { code: 'active_run_conflict', run_id: 'run-active', status: 'running' },

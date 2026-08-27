@@ -51,6 +51,13 @@ async def test_fastapi_router_exposes_session_and_stream_contract():
         listed = await client.get("/assistant/sessions")
         assert [item["id"] for item in listed.json()] == [session_id]
         assert listed.json()[0]["title"] == "Tokyo trip"
+        usage = await client.get(f"/assistant/sessions/{session_id}/context-usage")
+        assert usage.status_code == 200
+        body = usage.json()
+        assert body["budget_tokens"] == 80_000
+        assert body["used_tokens"] > 0
+        assert body["source"] == "estimated"
+        assert any(item["id"] == "conversation" for item in body["categories"])
 
 
 async def test_fastapi_cancel_endpoint_persists_terminal_event():
@@ -135,3 +142,41 @@ async def test_run_creation_is_idempotent_and_conflicts_include_active_run():
         assert detail["run_id"] == first.json()["run_id"]
         assert detail["status"] in {"queued", "running"}
         await client.post(f"/assistant/runs/{first.json()['run_id']}/cancel")
+
+
+async def test_context_usage_endpoint_includes_host_context():
+    runtime = Runtime(
+        agents=[
+            Agent(
+                name="assistant",
+                instructions="Reply",
+                context=lambda ctx: f"user={ctx.deps.get('username')}",
+            )
+        ],
+        model=ScriptedModel([ModelCompleted(text="Hello")]),
+        store=MemoryStore(),
+        context_budget_tokens=5000,
+    )
+
+    async def identity(_request: Request) -> Identity:
+        return Identity(subject_id="user")
+
+    async def context_factory(_request: Request, _session, _run=None):
+        return {"username": "alice"}
+
+    app = FastAPI()
+    app.include_router(
+        create_router(
+            runtime,
+            identity_resolver=identity,
+            context_factory=context_factory,
+        ),
+        prefix="/assistant",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        session = (await client.post("/assistant/sessions", json={})).json()
+        usage = await client.get(f"/assistant/sessions/{session['id']}/context-usage")
+        assert usage.status_code == 200
+        assert usage.json()["budget_tokens"] == 5000
+        ids = {item["id"] for item in usage.json()["categories"]}
+        assert "context" in ids

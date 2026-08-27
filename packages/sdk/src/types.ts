@@ -70,6 +70,22 @@ export interface SessionMessage {
   readonly created_at: string;
 }
 
+export interface ContextUsageCategory {
+  readonly id: string;
+  readonly label: string;
+  readonly tokens: number;
+}
+
+export interface ContextUsage {
+  readonly budget_tokens: number;
+  readonly used_tokens: number;
+  readonly used_percent: number;
+  readonly categories: readonly ContextUsageCategory[];
+  readonly source: 'estimated' | 'provider';
+  readonly estimated_tokens?: number;
+  readonly prompt_tokens?: number;
+}
+
 export interface Session {
   readonly id: string;
   readonly agent_name: string;

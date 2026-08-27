@@ -1,5 +1,5 @@
 import { consumeRungentStream } from './stream';
-import type { RungentEvent, Run, Session } from './types';
+import type { ContextUsage, RungentEvent, Run, Session } from './types';
 
 export interface RungentClientOptions {
   readonly baseUrl?: string;
@@ -89,6 +89,10 @@ export class RungentClient {
 
   async getSession(sessionId: string): Promise<Session> {
     return this.json(`/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  async getContextUsage(sessionId: string): Promise<ContextUsage> {
+    return this.json(`/sessions/${encodeURIComponent(sessionId)}/context-usage`);
   }
 
   async listRuns(sessionId: string): Promise<readonly Run[]> {

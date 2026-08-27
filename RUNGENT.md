@@ -62,9 +62,8 @@ This is the canonical short context for an AI coding agent integrating Rungent.
     endpoint terminates the active drive and persists `run.cancelled`. Treat `cancelled` as a
     distinct terminal state.
 14. Add trusted provider-specific top-level request fields through
-    `OpenAICompatibleModel(extra_body=...)` or the `LLM_EXTRA_BODY` JSON object. Core request fields
-    cannot be overridden. For latency-sensitive Qwen runs, for example, use
-    `{"enable_thinking":false}`.
+    `OpenAICompatibleModel(extra_body=...)`. Core request fields cannot be overridden. For
+    latency-sensitive Qwen runs, for example, use `{"enable_thinking":false}`.
 15. Malformed or truncated tool-argument JSON is retried inside the same model step. Rungent resets
     partial text and asks the provider for compact valid JSON before any tool can execute.
 16. A host tool may return `ToolResult.interaction=InteractionRequest(...)` with a frozen

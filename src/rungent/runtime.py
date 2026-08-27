@@ -6,7 +6,7 @@ import re
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, cast
 
@@ -38,6 +38,11 @@ from .state import (
 )
 from .store import Store
 from .tools import ApprovalPolicy, Tool, ToolContext, ToolEffect, validation_error_message
+from .usage import (
+    DEFAULT_CONTEXT_BUDGET_TOKENS,
+    calibrate_context_usage,
+    estimate_context_usage,
+)
 
 _PROGRESS_INSTRUCTIONS = """Public progress updates:
 - For a multi-step task, report useful progress alongside business tool calls when possible.
@@ -61,6 +66,13 @@ class ActiveRunConflict(ValueError):
         self.run = run
 
 
+@dataclass(frozen=True, slots=True)
+class _AssembledPrompt:
+    messages: list[dict[str, Any]]
+    tool_schemas: list[dict[str, Any]]
+    usage: dict[str, Any]
+
+
 class Runtime:
     def __init__(
         self,
@@ -77,6 +89,7 @@ class Runtime:
         external_task_canceller: ExternalTaskCanceller | None = None,
         dependency_provider: RunDependencyProvider | None = None,
         event_listener: RuntimeEventListener | None = None,
+        context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
     ) -> None:
         if not agents:
             raise ValueError("Runtime needs at least one agent")
@@ -96,6 +109,8 @@ class Runtime:
             raise ValueError("model_step_timeout_seconds must be positive when provided")
         if model_step_total_timeout_seconds is not None and model_step_total_timeout_seconds <= 0:
             raise ValueError("model_step_total_timeout_seconds must be positive when provided")
+        if context_budget_tokens <= 0:
+            raise ValueError("context_budget_tokens must be positive")
         self.model = model
         self.store = store
         self.max_model_steps = max_model_steps
@@ -106,6 +121,7 @@ class Runtime:
         self.external_task_canceller = external_task_canceller
         self.dependency_provider = dependency_provider
         self.event_listener = event_listener
+        self.context_budget_tokens = context_budget_tokens
         self._session_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._worker_task: asyncio.Task[None] | None = None
@@ -144,6 +160,63 @@ class Runtime:
         session = await self.store.get_session(session_id)
         self._authorize(session, identity)
         return session, list(await self.store.list_messages(session_id))
+
+    async def get_context_usage(
+        self,
+        session_id: str,
+        *,
+        identity: Identity,
+        deps: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        session, _ = await self.get_session(session_id, identity=identity)
+        agent = self.agents[session.agent_name]
+        ctx = ToolContext(
+            identity=identity,
+            session_id=session.id,
+            run_id="",
+            current_input="",
+            resource=session.resource,
+            deps=deps or {},
+        )
+        assembled = await self._assemble_prompt(session, agent, ctx)
+        return assembled.usage
+
+    async def _assemble_prompt(
+        self,
+        session: Session,
+        agent: Agent,
+        ctx: ToolContext,
+    ) -> _AssembledPrompt:
+        conversation = [item.model_message() for item in await self.store.list_messages(session.id)]
+        context_text = ""
+        if agent.context:
+            context = agent.context(ctx)
+            if inspect.isawaitable(context):
+                context = await context
+            if context:
+                context_text = f"Current context:\n{context}"
+        messages = [
+            {"role": "system", "content": agent.instructions},
+            {"role": "system", "content": _PROGRESS_INSTRUCTIONS},
+        ]
+        if context_text:
+            messages.append({"role": "system", "content": context_text})
+        messages.extend(conversation)
+        tool_schemas = agent.tool_schemas(
+            interaction_response_available=ctx.interaction_response is not None
+        )
+        return _AssembledPrompt(
+            messages=messages,
+            tool_schemas=tool_schemas,
+            usage=estimate_context_usage(
+                instructions=agent.instructions,
+                runtime=_PROGRESS_INSTRUCTIONS,
+                context=context_text,
+                conversation=conversation,
+                tool_schemas=tool_schemas,
+                budget=self.context_budget_tokens,
+            ),
+        )
 
     async def list_sessions(self, *, identity: Identity) -> list[Session]:
         return list(await self.store.list_sessions(identity))
@@ -982,27 +1055,13 @@ class Runtime:
             run.model_steps += 1
             step = run.model_steps
             await self.store.save_run(run)
-            messages = [
-                {"role": "system", "content": agent.instructions},
-                {"role": "system", "content": _PROGRESS_INSTRUCTIONS},
-            ]
-            if agent.context:
-                context = agent.context(ctx)
-                if inspect.isawaitable(context):
-                    context = await context
-                if context:
-                    messages.append({"role": "system", "content": f"Current context:\n{context}"})
-            messages.extend(
-                item.model_message() for item in await self.store.list_messages(session.id)
-            )
-
+            assembled = await self._assemble_prompt(session, agent, ctx)
+            yield await self._emit(emitter, "context.usage", **assembled.usage)
             yield await self._emit(emitter, "model.started", step=step)
             completed: ModelCompleted | None = None
             stream = self.model.stream(
-                messages=messages,
-                tools=agent.tool_schemas(
-                    interaction_response_available=ctx.interaction_response is not None
-                ),
+                messages=assembled.messages,
+                tools=assembled.tool_schemas,
                 model=agent.model,
             ).__aiter__()
             pending = asyncio.ensure_future(anext(stream))
@@ -1143,6 +1202,14 @@ class Runtime:
                 finish_reason=completed.finish_reason,
                 provider_request_id=completed.provider_request_id,
             )
+            if completed.usage:
+                calibrated = calibrate_context_usage(
+                    assembled.usage,
+                    provider_usage=completed.usage,
+                    budget=self.context_budget_tokens,
+                )
+                if calibrated.get("source") == "provider":
+                    yield await self._emit(emitter, "context.usage", **calibrated)
 
             # A few compatible providers occasionally finish a stream without content or calls.
             # Retry it as a bounded model step instead of returning a successful empty answer.
