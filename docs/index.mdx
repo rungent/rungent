@@ -11,7 +11,8 @@ streaming events, persistence ports, and baseline evaluation.
 
 Rungent deliberately does **not** include a sidecar service, skill router, configuration console, or
 styled chat interface. An application imports the Python package, defines an Agent and tools, mounts
-the optional FastAPI router, and consumes events with the TypeScript SDK.
+the optional FastAPI router and/or MCP adapter, and consumes in-app events with the TypeScript SDK.
+MCP is an in-process transport for the same tools, not a hosted Rungent cloud.
 
 ## Design rules
 

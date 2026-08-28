@@ -92,3 +92,8 @@ class Agent:
                 if interaction_response_available or not item.requires_interaction_response
             ),
         ]
+
+    def export_skill(self, *, title: str | None = None, extra: str = "") -> str:
+        from .skill import export_skill
+
+        return export_skill(self, title=title, extra=extra)

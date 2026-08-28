@@ -6,6 +6,8 @@
     "getting-started",
     "python-api",
     "fastapi",
+    "mcp",
+    "external-agents",
     "interactions",
     "persistence",
     "frontend",

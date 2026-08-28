@@ -1,0 +1,36 @@
+---
+title: External agents
+description: Standard pattern for remote MCP plus a Skill, with host-owned OAuth.
+---
+
+A Rungent application can serve two consumers from one `@tool` catalog:
+
+1. The product UI, through `Runtime` and `rungent.fastapi`.
+2. A local coding agent (Claude, Cursor), through `rungent.mcp` and a Skill file.
+
+This is not a skill router and not a second agent runtime. The external model already plans. Rungent
+only exposes typed tools.
+
+## Recipe
+
+1. Keep the in-app Agent and FastAPI session API unchanged.
+2. Mount `create_mcp_asgi` at a public HTTPS path such as `/mcp`.
+3. Implement OAuth 2.1 (authorization code + PKCE) in the **host**. Return `401` + protected-resource
+   metadata from `/mcp` so the client can open a browser login. Do not give the client the first-party
+   session JWT.
+4. Publish a Skill that tells the local agent to use those MCP tools, verify the connector first, and
+   never invent REST paths. A host should serve both on one origin, for example
+   `https://<host>/mcp` and `https://<host>/skill`.
+
+Login windows come from the MCP client's OAuth flow, not from `request_input`.
+
+## Host vs Rungent
+
+| Standard in Rungent | Host application |
+| --- | --- |
+| Tool schema, effect, approval annotations | User login, consent, clients, refresh tokens |
+| Filter `requires_interaction_response` | Which tools are public |
+| Synthetic `ToolContext` on each call | `Identity` and `deps` (tokens, DB, HTTP) |
+| Skill markdown draft | Product Skill copy and connector URL |
+
+Do not wrap `Runtime.create_run` as an MCP tool. Do not put OAuth inside the Rungent package.

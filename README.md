@@ -2,7 +2,8 @@
 
 Rungent is a small, typed agent runtime that embeds into an existing Python application. It
 standardizes tool calling, the harness loop, durable sessions and runs, user interactions,
-deterministic approval gates, and an SSE event protocol.
+deterministic approval gates, and an SSE event protocol. The same tools can be mounted as an
+optional MCP adapter for external agents; OAuth stays in the host application.
 
 Its headless activity protocol exposes model steps, safe public progress, tools, and interactions as
 persisted events. It never exposes raw provider reasoning or hidden chain of thought.

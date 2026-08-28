@@ -10,7 +10,8 @@
 git push origin main --tags
 ```
 
-The script only bumps versions, commits, and tags. GitHub Actions publishes.
+The script bumps the shared semver, refreshes `uv.lock`, commits, and tags.
+GitHub Actions publishes. Do not add a follow-up lockfile commit after tagging.
 
 ## One-time registry setup (Trusted Publishing)
 

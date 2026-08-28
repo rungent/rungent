@@ -21,7 +21,9 @@ This is the canonical short context for an AI coding agent integrating Rungent.
    loop allows 16 model steps. Retryable timeouts, transport failures, HTTP 408/429, and server
    errors retry inside the same step up to three times; empty completions consume a new bounded
    step and never become empty user messages.
-6. Use the FastAPI router from `rungent.fastapi` when exposing the assistant over HTTP. Run
+6. Use the FastAPI router from `rungent.fastapi` when exposing the assistant over HTTP. Use
+   `rungent.mcp.create_mcp_asgi` to expose the same tools to an external MCP client without starting
+   a Run. Host applications own OAuth; `Agent.export_skill()` only drafts a Skill file. Run
    creation returns `202` with a Run ID; subscribe separately so disconnecting the event stream
    never cancels execution. Pass `Idempotency-Key` when a client may retry creation.
    `GET /sessions` lists the caller's sessions newest first. Hosts set `Session.title` with

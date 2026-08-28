@@ -29,6 +29,16 @@ if [[ "$BRANCH" != "main" ]]; then
   exit 1
 fi
 
+if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+  echo "Tag v${VERSION} already exists." >&2
+  exit 1
+fi
+
+if ! command -v uv >/dev/null; then
+  echo "uv is required to refresh uv.lock before tagging." >&2
+  exit 1
+fi
+
 python3 - "$VERSION" <<'PY'
 import pathlib, re, sys
 version = sys.argv[1]
@@ -59,7 +69,8 @@ pkg.write_text(new)
 print(f"Bumped versions to {version}")
 PY
 
-git add pyproject.toml packages/sdk/package.json
+uv lock
+git add pyproject.toml packages/sdk/package.json uv.lock
 git commit -m "release: v${VERSION}"
 git tag -a "v${VERSION}" -m "v${VERSION}"
 

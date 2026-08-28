@@ -45,6 +45,9 @@ Endpoints are intentionally resource-oriented:
 | `GET` | `/runs/{id}/events/stream` | Replay and follow events from `after_seq` |
 | `POST` | `/runs/{id}/responses` | Submit pending input and resume the Run |
 
+The same Agent can also be mounted with `rungent.mcp.create_mcp_asgi` for external clients. You do
+not need a second tool catalog. See [MCP adapter](/docs/mcp).
+
 Always supply an identity resolver. A browser-supplied subject header is not authentication.
 Run creation accepts `Idempotency-Key`. A conflicting request returns
 `detail.code=active_run_conflict` with the active Run ID. Disconnecting the event stream never

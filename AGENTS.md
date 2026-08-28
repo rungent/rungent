@@ -11,5 +11,5 @@ Project rules:
 - Add or update deterministic baseline coverage for every harness behavior.
 - Any public API change must update `docs/`, `RUNGENT.md`, Python tests, and SDK contract tests.
 - Do not add sidecar, skill routing, a styled chat UI, or another model provider abstraction unless a
-  real application requires it.
+  real application requires it. `rungent.mcp` is an in-process adapter, not a sidecar or skill router.
 

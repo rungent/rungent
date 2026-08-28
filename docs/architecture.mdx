@@ -18,6 +18,8 @@ flowchart LR
   Runtime --> Tools["Typed application tools"]
   Runtime --> Store["Memory or SQLAlchemy Store"]
   Tools --> Domain["Application services"]
+  Ext["External agent"] --> MCP["MCP adapter"]
+  MCP --> Tools
 ```
 
 This boundary gives Roasea direct, typed access to its existing services without a sidecar network
@@ -51,6 +53,7 @@ completion is trusted, terminal, and consumable exactly once.
 | --- | --- |
 | `rungent` | Agent definition, `@tool`, loop, interactions, ACS, model/store ports |
 | `rungent.fastapi` | Four resource-oriented endpoints and SSE transport |
+| `rungent.mcp` | Streamable HTTP MCP for the same `@tool` catalog |
 | `rungent.sqlalchemy` | Application-owned persistent store |
 | `rungent.testing` | deterministic harness tests and real-model application baselines |
 | `@rungent/sdk` | headless stream parser, client, and reducer |
@@ -58,8 +61,10 @@ completion is trusted, terminal, and consumable exactly once.
 
 ## Deliberate omissions
 
-- No sidecar until an actual cross-process consumer requires it.
-- No skill router; begin with one product Agent and normal typed tools.
+- No sidecar until an actual cross-process consumer requires it. `rungent.mcp` is an in-process
+  adapter, like `rungent.fastapi`.
+- No skill router; begin with one product Agent and normal typed tools. `Agent.export_skill()`
+  writes a file for an external agent and does not route inside the Runtime.
 - No styled chat component; Roasea keeps its design system and renders the headless state.
 - No provider-specific event types in the browser.
 - No prompt-based safety decisions where deterministic runtime policy can enforce them.

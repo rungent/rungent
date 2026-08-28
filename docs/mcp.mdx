@@ -1,0 +1,56 @@
+---
+title: MCP adapter
+description: Expose the same typed Agent tools to an external MCP client.
+---
+
+Mount `rungent.mcp.create_mcp_asgi` next to the product FastAPI router. The adapter invokes `@tool`
+functions directly. It does not start a Runtime session, emit ACS events, or run the model loop.
+
+```python
+from fastapi import FastAPI, Request
+
+from rungent import Identity
+from rungent.fastapi import create_router
+from rungent.mcp import create_mcp_asgi
+
+
+async def resolve_identity(request: Request) -> Identity:
+    user = await current_user(request)
+    return Identity(subject_id=user.id, tenant_id=user.tenant_id)
+
+
+app = FastAPI()
+app.include_router(
+    create_router(runtime, identity_resolver=resolve_identity),
+    prefix="/api/assistant",
+)
+app.include_router(
+    create_mcp_asgi(
+        agent,
+        identity_resolver=resolve_identity,
+        context_factory=mcp_deps,
+        resource_metadata_url="https://example.com/.well-known/oauth-protected-resource",
+    ),
+    prefix="/mcp",
+)
+```
+
+Use the same `Agent` and the same `@tool` implementations. Pass `tools=` when the external catalog
+must be a subset (hide `open_page` and every `requires_interaction_response` continuation).
+
+## Behavior
+
+| Runtime / FastAPI | MCP adapter |
+| --- | --- |
+| Model plans tool calls | The external agent plans |
+| Session + Run + ACS | One-shot `tools/call` |
+| `approval="always"` gates in ACS | Exported as annotations / `_meta.confirmation` |
+| `InteractionRequest` pauses the Run | Returned as a `missing_arguments` error |
+| `request_input` / `report_progress` | Not advertised |
+
+Unauthenticated POST `/mcp` returns `401` with
+`WWW-Authenticate: Bearer … resource_metadata="…"`. OAuth discovery and login belong to the host
+application. See [External agents](/docs/external-agents).
+
+`Agent.export_skill()` writes a SKILL.md draft from exportable tools. Rewrite the voice and auth
+steps in the host product; do not ship the in-app system prompt as a Skill.

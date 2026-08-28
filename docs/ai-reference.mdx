@@ -25,6 +25,7 @@ from rungent import (
     tool,
 )
 from rungent.fastapi import create_router
+from rungent.mcp import create_mcp_asgi
 from rungent.llm import OpenAICompatibleModel
 from rungent.sqlalchemy import RungentBase, SQLAlchemyStore
 from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_baseline
@@ -78,6 +79,9 @@ from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_base
 - Equivalent successful non-read calls are deduplicated within a Run after argument normalization.
   Use an explicit batch/count argument; set `deduplicate=False` only for genuinely repeatable writes.
 - Sessions are owned by `Identity`; identity resolution belongs to the host application.
+- `create_mcp_asgi` invokes exportable tools (`requires_interaction_response` is omitted). It does
+  not use Runtime, ACS, or `request_input`. Host code owns OAuth. `Agent.export_skill()` is a
+  markdown draft, not a router.
 - One session has at most one active Run; resume the waiting Run instead of starting another.
 - ACS `seq` is monotonic for the complete Run, including every pause/resume cycle.
 - Model step IDs and the 16-step default budget are also monotonic across pause/resume cycles;
@@ -113,6 +117,7 @@ GET    /runs/{run_id}/events?after_seq={seq}
 GET    /runs/{run_id}/events/stream?after_seq={seq}
 POST   /runs/{run_id}/responses
 POST   /runs/{run_id}/cancel
+POST   /mcp                  # JSON-RPC initialize, tools/list, tools/call
 ```
 
 ## ACS envelope

@@ -35,6 +35,9 @@ jobs:
           python-version: '3.11'
           enable-cache: true
 
+      - name: Check lockfile is current
+        run: uv lock --check
+
       - name: Python checks and build
         run: |
           uv sync --all-extras --locked
