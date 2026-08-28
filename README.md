@@ -49,9 +49,13 @@ runtime = Runtime(
 )
 ```
 
-The canonical documentation lives in `docs/` and is rendered by the Fumadocs app in `apps/docs`.
-AI coding agents should start with [`RUNGENT.md`](RUNGENT.md); the running site also exposes
-`/llms.txt`, `/llms-full.txt`, and per-page raw Markdown under `/markdown/*`.
+Documentation: [rungent.github.io](https://rungent.github.io). Source lives in `docs/` and is
+rendered by the Fumadocs app in `apps/docs`.
+
+AI coding agents should start with [`RUNGENT.md`](RUNGENT.md), then load
+[llms.txt](https://rungent.github.io/llms.txt) or the full dump
+[llms-full.txt](https://rungent.github.io/llms-full.txt). Per-page raw Markdown is at
+`https://rungent.github.io/markdown/<page>.md`.
 
 ## Development
 
@@ -65,6 +69,11 @@ pnpm dev:docs
 pnpm test
 pnpm build
 ```
+
+The public site is [rungent.github.io](https://rungent.github.io). After docs changes land on
+`main`, run **Publish** on [`rungent/rungent.github.io`](https://github.com/rungent/rungent.github.io/actions)
+(or set repo secret `GH_PAGES_TOKEN` so CI can trigger that workflow). The org disables deploy keys,
+so the pages repo rebuilds from this repository with its own `GITHUB_TOKEN`.
 
 ## Release
 

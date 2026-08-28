@@ -1,3 +1,4 @@
+import { CopyForLlm } from '@/components/copy-for-llm';
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
 
 export const baseOptions: BaseLayoutProps = {
@@ -10,8 +11,7 @@ export const baseOptions: BaseLayoutProps = {
     ),
   },
   links: [
-    { text: 'LLM context', url: '/llms.txt', external: true },
-    { text: 'Full Markdown', url: '/llms-full.txt', external: true },
+    { type: 'button', text: 'Docs', url: '/docs', secondary: true },
+    { type: 'custom', secondary: true, children: <CopyForLlm /> },
   ],
 };
-

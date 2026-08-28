@@ -4,7 +4,7 @@
   "description": "Headless TypeScript SDK for Rungent sessions, runs, interactions, and ACS",
   "type": "module",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/rungent/rungent",
+  "homepage": "https://rungent.github.io",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rungent/rungent.git",

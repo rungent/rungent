@@ -3,6 +3,8 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
+    "prebuild": "node ./scripts/write-llm-artifacts.mjs",
+    "predev": "node ./scripts/write-llm-artifacts.mjs",
     "build": "next build --webpack",
     "dev": "next dev --port 3001",
     "start": "next start --port 3001",

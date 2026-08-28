@@ -1,0 +1,47 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install and build docs
+        env:
+          NEXT_PUBLIC_SITE_URL: https://rungent.github.io
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @rungent/docs build
+
+      - name: Request site publish
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAGES_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "GH_PAGES_TOKEN unset; publish from rungent/rungent.github.io → Actions → Publish"
+            exit 0
+          fi
+          gh workflow run publish.yml --repo rungent/rungent.github.io \
+            -f source_sha="${{ github.sha }}"

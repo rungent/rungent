@@ -6,7 +6,3 @@ export const source = loader({
   source: docs.toFumadocsSource(),
 });
 
-export async function pageText(page: ReturnType<typeof source.getPages>[number]) {
-  return `# ${page.data.title}\n\n${await page.data.getText('processed')}`;
-}
-

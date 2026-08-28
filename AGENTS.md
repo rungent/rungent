@@ -1,7 +1,8 @@
 # Rungent project instructions
 
-Read `RUNGENT.md` before integrating or modifying Rungent. The rendered documentation is sourced
-from `docs/`; `docs/ai-reference.mdx` is the complete API reference intended for coding agents.
+Read `RUNGENT.md` before integrating or modifying Rungent. Published docs:
+https://rungent.github.io — source is `docs/`; `docs/ai-reference.mdx` is the complete API
+reference intended for coding agents. Load https://rungent.github.io/llms-full.txt when possible.
 
 Project rules:
 

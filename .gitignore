@@ -39,6 +39,11 @@ yarn-error.log*
 out/
 apps/docs/.next/
 apps/docs/.source/
+apps/docs/public/llms.txt
+apps/docs/public/llms-full.txt
+apps/docs/public/markdown/
+apps/docs/public/robots.txt
+apps/docs/public/sitemap.xml
 
 # Test & coverage (JS)
 coverage/

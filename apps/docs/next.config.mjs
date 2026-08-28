@@ -4,7 +4,9 @@ const withMDX = createMDX();
 
 export default withMDX({
   reactStrictMode: true,
-  output: 'standalone',
+  output: 'export',
+  trailingSlash: true,
+  images: { unoptimized: true },
   turbopack: {},
   webpack(config) {
     // Fumadocs loads generated MDX through a dynamic file URL that webpack cannot track for

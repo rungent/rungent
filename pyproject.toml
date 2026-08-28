@@ -22,8 +22,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rungent/rungent"
-Documentation = "https://github.com/rungent/rungent/tree/main/docs"
+Homepage = "https://rungent.github.io"
+Documentation = "https://rungent.github.io"
 Repository = "https://github.com/rungent/rungent"
 Issues = "https://github.com/rungent/rungent/issues"
 Changelog = "https://github.com/rungent/rungent/releases"
