@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 
-export function CopyForLlm() {
+export function CopyForLlm({ className = 'copy-for-llm' }: { className?: string }) {
   const [copied, setCopied] = useState(false);
 
   async function copy() {
@@ -14,7 +14,7 @@ export function CopyForLlm() {
   }
 
   return (
-    <button className="copy-for-llm" type="button" onClick={() => void copy()}>
+    <button className={className} type="button" onClick={() => void copy()}>
       {copied ? 'Copied' : 'For LLM'}
     </button>
   );

@@ -37,6 +37,30 @@ body {
   margin-bottom: 2rem;
 }
 
+#nd-docs-layout {
+  overflow-x: visible;
+}
+
+@media (min-width: 768px) {
+  [data-sidebar-placeholder] {
+    align-self: start;
+    position: sticky;
+    top: 0;
+    height: 100dvh;
+    max-height: 100dvh;
+  }
+}
+
+@media (min-width: 1280px) {
+  #nd-toc {
+    align-self: start;
+    position: sticky;
+    top: 0;
+    height: 100dvh;
+    max-height: 100dvh;
+  }
+}
+
 .eyebrow {
   margin-bottom: 0.55rem;
   color: var(--color-fd-muted-foreground);

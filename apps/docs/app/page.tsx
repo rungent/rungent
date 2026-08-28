@@ -1,3 +1,4 @@
+import { CopyForLlm } from '@/components/copy-for-llm';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import Link from 'next/link';
 
@@ -74,9 +75,10 @@ export default function HomePage() {
           <Link className="home-button" href="/docs/getting-started">
             Get started
           </Link>
-          <a className="home-button home-button-ghost" href="https://github.com/rungent/rungent">
-            GitHub
-          </a>
+          <Link className="home-button home-button-ghost" href="/docs">
+            Docs
+          </Link>
+          <CopyForLlm className="home-button home-button-ghost" />
         </div>
         <pre className="home-install">
           <code>pip install rungent{'\n'}npm install @rungent/sdk</code>

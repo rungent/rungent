@@ -1,4 +1,3 @@
-import { CopyForLlm } from '@/components/copy-for-llm';
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
 
 export const baseOptions: BaseLayoutProps = {
@@ -10,8 +9,4 @@ export const baseOptions: BaseLayoutProps = {
       </span>
     ),
   },
-  links: [
-    { type: 'button', text: 'Docs', url: '/docs', secondary: true },
-    { type: 'custom', secondary: true, children: <CopyForLlm /> },
-  ],
 };
