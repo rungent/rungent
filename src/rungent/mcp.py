@@ -144,7 +144,8 @@ def create_mcp_asgi(
     async def dispatch(request: Request, body: dict[str, Any]) -> dict[str, Any] | None:
         rpc_id = body.get("id")
         method = body.get("method")
-        params = body.get("params") if isinstance(body.get("params"), dict) else {}
+        raw_params = body.get("params")
+        params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
         if method == "initialize":
             return _jsonrpc_result(
                 rpc_id,
