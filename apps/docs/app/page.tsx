@@ -65,7 +65,10 @@ export default function HomePage() {
     <HomeLayout {...baseOptions}>
       <div className="home">
         <p className="eyebrow">Embedded agent runtime</p>
-        <h1>Rungent</h1>
+        <div className="home-title-row">
+          <h1>Rungent</h1>
+          <CopyForLlm className="home-button home-button-ghost" />
+        </div>
         <p className="lede">
           A small, typed agent runtime that embeds into an existing Python application. It
           standardizes tools, the harness loop, durable sessions, approvals, and SSE activity —
@@ -78,7 +81,6 @@ export default function HomePage() {
           <Link className="home-button home-button-ghost" href="/docs">
             Docs
           </Link>
-          <CopyForLlm className="home-button home-button-ghost" />
         </div>
         <pre className="home-install">
           <code>pip install rungent{'\n'}npm install @rungent/sdk</code>
