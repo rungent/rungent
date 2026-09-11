@@ -446,9 +446,7 @@ async def test_submit_response_commits_before_the_continuation_runs():
     assert persisted.status is RunStatus.RUNNING
     assert persisted.pending_call is None
     assert persisted.event_seq == after + 1
-    committed = await runtime.get_run_events(
-        interaction.run_id, identity=identity, after_seq=after
-    )
+    committed = await runtime.get_run_events(interaction.run_id, identity=identity, after_seq=after)
     assert [event.type for event in committed] == ["interaction.resolved"]
 
     followed: list[str] = []

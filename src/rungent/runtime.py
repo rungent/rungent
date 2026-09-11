@@ -927,9 +927,7 @@ class Runtime:
             raise ValueError("Run is not waiting for input")
         if pending.interaction.id != response.interaction_id:
             raise ValueError("Interaction does not belong to this run")
-        response_value = self._normalize_interaction_response(
-            pending.interaction, response.value
-        )
+        response_value = self._normalize_interaction_response(pending.interaction, response.value)
         emitter = EventEmitter(session.id, run.id, sequence=run.event_seq)
         pending.interaction.resolved = True
         event = await self._emit(
@@ -988,9 +986,7 @@ class Runtime:
             }
             if approved:
                 tool = self.agents[session.agent_name].tool_map()[call.name]
-                async for event in self._execute_tool(
-                    session, run, ctx, tool, call, emitter
-                ):
+                async for event in self._execute_tool(session, run, ctx, tool, call, emitter):
                     yield event
             else:
                 await self.store.append_message(
@@ -1024,9 +1020,7 @@ class Runtime:
                 session.id,
                 Message(
                     role="tool",
-                    content=json.dumps(
-                        {"user_response": response_value}, ensure_ascii=False
-                    ),
+                    content=json.dumps({"user_response": response_value}, ensure_ascii=False),
                     tool_call_id=call.id,
                     name="request_input",
                 ),
