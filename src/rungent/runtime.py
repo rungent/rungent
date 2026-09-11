@@ -73,6 +73,22 @@ class _AssembledPrompt:
     usage: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class _AcceptedInteraction:
+    pending: PendingCall
+    response_value: Any
+    emitter: EventEmitter
+    event: Event
+
+
+_CLIENT_BOUNDARIES = {
+    RunStatus.COMPLETED,
+    RunStatus.FAILED,
+    RunStatus.CANCELLED,
+    RunStatus.WAITING_INPUT,
+}
+
+
 class Runtime:
     def __init__(
         self,
@@ -741,12 +757,13 @@ class Runtime:
                 cursor = event.seq
                 yield event
             run = await self.store.get_run(run_id)
-            if run.status in {
-                RunStatus.COMPLETED,
-                RunStatus.FAILED,
-                RunStatus.CANCELLED,
-                RunStatus.WAITING_INPUT,
-            } and not await self.store.list_events(run_id, after_seq=cursor):
+            task = self._run_tasks.get(run_id)
+            in_flight = task is not None and not task.done()
+            if (
+                run.status in _CLIENT_BOUNDARIES
+                and not in_flight
+                and not await self.store.list_events(run_id, after_seq=cursor)
+            ):
                 return
             await asyncio.sleep(poll_interval_seconds)
 
@@ -832,115 +849,24 @@ class Runtime:
         self._authorize(session, identity)
         async with self._session_locks[session.id]:
             run = await self.store.get_run(run_id)
-            pending = run.pending_call
-            if run.status != RunStatus.WAITING_INPUT or pending is None:
-                raise ValueError("Run is not waiting for input")
-            if pending.interaction.id != response.interaction_id:
-                raise ValueError("Interaction does not belong to this run")
-            response_value = self._normalize_interaction_response(
-                pending.interaction, response.value
-            )
-
-            emitter = EventEmitter(session.id, run.id, sequence=run.event_seq)
+            accepted = await self._accept_interaction(run, session, response)
             task = asyncio.current_task()
             if task is not None:
                 self._run_tasks[run.id] = task
             try:
-                pending.interaction.resolved = True
-                yield await self._emit(
-                    emitter,
-                    "interaction.resolved",
-                    interaction_id=pending.interaction.id,
-                    kind=pending.interaction.kind,
-                )
-                run.status = RunStatus.RUNNING
-                run.pending_call = None
-                await self.store.save_run(run)
-
-                ctx = ToolContext(
-                    identity=identity,
-                    session_id=session.id,
-                    run_id=run.id,
-                    current_input=run.input,
-                    resource=session.resource,
-                    deps=dict(deps or {}),
-                )
-                call = pending.call
-                trusted_response = (
-                    TrustedInteractionResponse(
-                        interaction_id=pending.interaction.id,
-                        kind=pending.interaction.kind,
-                        prompt=pending.interaction.prompt,
-                        value=response_value,
-                    )
-                    if pending.interaction.kind != "approval"
-                    else None
-                )
-                drive_response: TrustedInteractionResponse | None = trusted_response
-                if pending.kind == "approval":
-                    approved = response_value is True or str(response_value).lower() in {
-                        "approve",
-                        "yes",
-                        "true",
-                    }
-                    if approved:
-                        tool = self.agents[session.agent_name].tool_map()[call.name]
-                        async for event in self._execute_tool(
-                            session, run, ctx, tool, call, emitter
-                        ):
-                            yield event
-                    else:
-                        await self.store.append_message(
-                            session.id,
-                            Message(
-                                role="tool",
-                                content=ToolError(
-                                    code="rejected",
-                                    message="The user rejected this operation.",
-                                ).for_model(),
-                                tool_call_id=call.id,
-                                name=call.name,
-                            ),
-                        )
-                    drive_response = None
-                    if run.status == RunStatus.WAITING_INPUT:
-                        return
-                elif pending.kind == "continuation":
-                    assert trusted_response is not None
-                    tool = self.agents[session.agent_name].tool_map()[call.name]
-                    continuation_ctx = replace(ctx, interaction_response=trusted_response)
-                    async for event in self._execute_tool(
-                        session, run, continuation_ctx, tool, call, emitter
-                    ):
-                        yield event
-                    drive_response = None
-                    if run.status == RunStatus.WAITING_INPUT:
-                        return
-                else:
-                    await self.store.append_message(
-                        session.id,
-                        Message(
-                            role="tool",
-                            content=__import__("json").dumps(
-                                {"user_response": response_value}, ensure_ascii=False
-                            ),
-                            tool_call_id=call.id,
-                            name="request_input",
-                        ),
-                    )
-                async for event in self._safe_drive(
+                yield accepted.event
+                async for event in self._continue_accepted(
                     session,
                     run,
                     identity,
                     dict(deps or {}),
-                    emitter,
-                    interaction_response=drive_response,
+                    accepted,
                 ):
                     yield event
             finally:
                 if self._run_tasks.get(run.id) is task:
                     self._run_tasks.pop(run.id, None)
-                run.event_seq = emitter.sequence
+                run.event_seq = accepted.emitter.sequence
                 await self.store.save_run(run)
 
     async def submit_response(
@@ -951,33 +877,169 @@ class Runtime:
         identity: Identity,
         deps: Mapping[str, Any] | None = None,
     ) -> Run:
-        """Validate an answer and detach its continuation from the HTTP request."""
+        """Commit the answer, then detach its continuation from the HTTP request."""
         run = await self.store.get_run(run_id)
         session = await self.store.get_session(run.session_id)
         self._authorize(session, identity)
-        pending = run.pending_call
-        if run.status is not RunStatus.WAITING_INPUT or pending is None:
+        async with self._session_locks[session.id]:
+            run = await self.store.get_run(run_id)
             existing_task = self._run_tasks.get(run_id)
+            if run.status is not RunStatus.WAITING_INPUT or run.pending_call is None:
+                if existing_task is not None and not existing_task.done():
+                    return run
+                raise ValueError("Run is not waiting for input")
             if existing_task is not None and not existing_task.done():
                 return run
-            raise ValueError("Run is not waiting for input")
-        if pending.interaction.id != response.interaction_id:
-            raise ValueError("Interaction does not belong to this run")
-        self._normalize_interaction_response(pending.interaction, response.value)
-        existing_task = self._run_tasks.get(run_id)
-        if existing_task is None or existing_task.done():
+            accepted = await self._accept_interaction(run, session, response)
 
             async def consume() -> None:
-                async for _event in self.stream_response(
-                    run_id=run_id,
-                    response=response,
-                    identity=identity,
-                    deps=deps,
-                ):
-                    pass
+                async with self._session_locks[session.id]:
+                    task = asyncio.current_task()
+                    if task is not None:
+                        self._run_tasks[run_id] = task
+                    try:
+                        async for _event in self._continue_accepted(
+                            session,
+                            run,
+                            identity,
+                            dict(deps or {}),
+                            accepted,
+                        ):
+                            pass
+                    finally:
+                        if self._run_tasks.get(run_id) is task:
+                            self._run_tasks.pop(run_id, None)
+                        run.event_seq = accepted.emitter.sequence
+                        await self.store.save_run(run)
 
             self._run_tasks[run_id] = asyncio.create_task(consume())
         return run
+
+    async def _accept_interaction(
+        self,
+        run: Run,
+        session: Session,
+        response: InteractionResponse,
+    ) -> _AcceptedInteraction:
+        """Persist the answer before any subscriber can treat waiting_input as a boundary."""
+        pending = run.pending_call
+        if run.status is not RunStatus.WAITING_INPUT or pending is None:
+            raise ValueError("Run is not waiting for input")
+        if pending.interaction.id != response.interaction_id:
+            raise ValueError("Interaction does not belong to this run")
+        response_value = self._normalize_interaction_response(
+            pending.interaction, response.value
+        )
+        emitter = EventEmitter(session.id, run.id, sequence=run.event_seq)
+        pending.interaction.resolved = True
+        event = await self._emit(
+            emitter,
+            "interaction.resolved",
+            interaction_id=pending.interaction.id,
+            kind=pending.interaction.kind,
+        )
+        run.status = RunStatus.RUNNING
+        run.pending_call = None
+        run.event_seq = emitter.sequence
+        await self.store.save_run(run)
+        return _AcceptedInteraction(
+            pending=pending,
+            response_value=response_value,
+            emitter=emitter,
+            event=event,
+        )
+
+    async def _continue_accepted(
+        self,
+        session: Session,
+        run: Run,
+        identity: Identity,
+        deps: Mapping[str, Any],
+        accepted: _AcceptedInteraction,
+    ) -> AsyncIterator[Event]:
+        pending = accepted.pending
+        response_value = accepted.response_value
+        emitter = accepted.emitter
+        ctx = ToolContext(
+            identity=identity,
+            session_id=session.id,
+            run_id=run.id,
+            current_input=run.input,
+            resource=session.resource,
+            deps=dict(deps),
+        )
+        call = pending.call
+        trusted_response = (
+            TrustedInteractionResponse(
+                interaction_id=pending.interaction.id,
+                kind=pending.interaction.kind,
+                prompt=pending.interaction.prompt,
+                value=response_value,
+            )
+            if pending.interaction.kind != "approval"
+            else None
+        )
+        drive_response: TrustedInteractionResponse | None = trusted_response
+        if pending.kind == "approval":
+            approved = response_value is True or str(response_value).lower() in {
+                "approve",
+                "yes",
+                "true",
+            }
+            if approved:
+                tool = self.agents[session.agent_name].tool_map()[call.name]
+                async for event in self._execute_tool(
+                    session, run, ctx, tool, call, emitter
+                ):
+                    yield event
+            else:
+                await self.store.append_message(
+                    session.id,
+                    Message(
+                        role="tool",
+                        content=ToolError(
+                            code="rejected",
+                            message="The user rejected this operation.",
+                        ).for_model(),
+                        tool_call_id=call.id,
+                        name=call.name,
+                    ),
+                )
+            drive_response = None
+            if run.status == RunStatus.WAITING_INPUT:
+                return
+        elif pending.kind == "continuation":
+            assert trusted_response is not None
+            tool = self.agents[session.agent_name].tool_map()[call.name]
+            continuation_ctx = replace(ctx, interaction_response=trusted_response)
+            async for event in self._execute_tool(
+                session, run, continuation_ctx, tool, call, emitter
+            ):
+                yield event
+            drive_response = None
+            if run.status == RunStatus.WAITING_INPUT:
+                return
+        else:
+            await self.store.append_message(
+                session.id,
+                Message(
+                    role="tool",
+                    content=json.dumps(
+                        {"user_response": response_value}, ensure_ascii=False
+                    ),
+                    tool_call_id=call.id,
+                    name="request_input",
+                ),
+            )
+        async for event in self._safe_drive(
+            session,
+            run,
+            identity,
+            deps,
+            emitter,
+            interaction_response=drive_response,
+        ):
+            yield event
 
     async def _safe_drive(
         self,

@@ -144,6 +144,56 @@ async def test_run_creation_is_idempotent_and_conflicts_include_active_run():
         await client.post(f"/assistant/runs/{first.json()['run_id']}/cancel")
 
 
+async def test_submit_response_keeps_sse_open_for_the_continuation():
+    runtime = Runtime(
+        agents=[Agent(name="assistant", instructions="Ask")],
+        model=ScriptedModel(
+            [
+                ModelCompleted(
+                    tool_calls=[
+                        ToolCall(
+                            id="ask",
+                            name="request_input",
+                            arguments={"kind": "text", "prompt": "Which city?"},
+                        )
+                    ]
+                ),
+                ModelCompleted(text="Kyoto"),
+            ]
+        ),
+        store=MemoryStore(),
+    )
+
+    async def identity(_request: Request) -> Identity:
+        return Identity(subject_id="user")
+
+    app = FastAPI()
+    app.include_router(create_router(runtime, identity_resolver=identity), prefix="/assistant")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        session = (await client.post("/assistant/sessions", json={})).json()
+        created = await client.post(
+            f"/assistant/sessions/{session['id']}/runs", json={"input": "Plan"}
+        )
+        run_id = created.json()["run_id"]
+        first = await client.get(f"/assistant/runs/{run_id}/events/stream")
+        assert '"type": "interaction.requested"' in first.text
+        events = (await client.get(f"/assistant/runs/{run_id}/events")).json()
+        interaction = next(item for item in events if item["type"] == "interaction.requested")
+        submitted = await client.post(
+            f"/assistant/runs/{run_id}/responses",
+            json={"interaction_id": interaction["data"]["id"], "value": "Kyoto"},
+        )
+        assert submitted.status_code == 202
+        listed = await client.get(f"/assistant/sessions/{session['id']}/runs")
+        assert listed.json()[0]["status"] in {"running", "completed"}
+        followed = await client.get(
+            f"/assistant/runs/{run_id}/events/stream",
+            params={"after_seq": interaction["seq"]},
+        )
+        assert '"type": "interaction.resolved"' in followed.text
+        assert '"type": "run.completed"' in followed.text
+
+
 async def test_context_usage_endpoint_includes_host_context():
     runtime = Runtime(
         agents=[

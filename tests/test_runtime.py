@@ -386,6 +386,90 @@ async def test_request_input_pauses_and_resumes_same_run():
     assert next(event for event in resumed if event.type == "model.started").data["step"] == 2
 
 
+async def test_submit_response_commits_before_the_continuation_runs():
+    class PauseAfterInput:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.release = asyncio.Event()
+
+        async def stream(
+            self,
+            *,
+            messages: Sequence[dict[str, Any]],
+            tools: Sequence[dict[str, Any]],
+            model: str | None = None,
+        ) -> AsyncIterator[ModelEvent]:
+            self.calls += 1
+            if self.calls == 1:
+                yield ModelCompleted(
+                    tool_calls=[
+                        ToolCall(
+                            id="ask",
+                            name="request_input",
+                            arguments={
+                                "kind": "choice",
+                                "prompt": "Which day?",
+                                "options": [
+                                    {"id": "one", "label": "Day 1"},
+                                    {"id": "two", "label": "Day 2"},
+                                ],
+                            },
+                        )
+                    ]
+                )
+                return
+            await self.release.wait()
+            yield ModelCompleted(text="Moved to day 2")
+
+    model = PauseAfterInput()
+    runtime = Runtime(
+        agents=[Agent(name="assistant", instructions="Use tools.")],
+        model=model,
+        store=MemoryStore(),
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    first = await collect(
+        runtime.stream_run(session_id=session.id, content="Move it", identity=identity)
+    )
+    interaction = first[-1]
+    after = interaction.seq
+    submitted = await runtime.submit_response(
+        run_id=interaction.run_id,
+        response=InteractionResponse(
+            interaction_id=interaction.data["id"], value={"selected": ["two"]}
+        ),
+        identity=identity,
+    )
+    assert submitted.status is RunStatus.RUNNING
+    persisted = await runtime.store.get_run(interaction.run_id)
+    assert persisted.status is RunStatus.RUNNING
+    assert persisted.pending_call is None
+    assert persisted.event_seq == after + 1
+    committed = await runtime.get_run_events(
+        interaction.run_id, identity=identity, after_seq=after
+    )
+    assert [event.type for event in committed] == ["interaction.resolved"]
+
+    followed: list[str] = []
+
+    async def follow() -> None:
+        async for event in runtime.stream_events(
+            interaction.run_id, identity=identity, after_seq=after
+        ):
+            followed.append(event.type)
+            if event.type == "run.completed":
+                return
+
+        watcher = asyncio.create_task(follow())
+        await asyncio.sleep(0.05)
+        assert followed[0] == "interaction.resolved"
+        assert "run.completed" not in followed
+        model.release.set()
+        await watcher
+        assert followed[-1] == "run.completed"
+
+
 async def test_request_input_ignores_non_object_choice_options():
     runtime = runtime_with(
         [
