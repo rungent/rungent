@@ -101,6 +101,37 @@ class InteractionQuestion(BaseModel):
     multiple: bool = False
     allow_custom: bool = False
     required: bool = True
+    role: Literal["referent", "slot", "operation"] | None = None
+
+
+class ApprovalImpact(BaseModel):
+    """Structured approval payload for write/destructive tools."""
+
+    title: str
+    target_label: str
+    effect: str
+    risk: str | None = None
+    cost_hint: str | None = None
+    changes: list[str] = Field(default_factory=list)
+
+    def as_prompt(self) -> str:
+        title = self.title.strip()
+        lines = [title]
+        target = self.target_label.strip()
+        effect = self.effect.strip()
+        if target and target != title:
+            lines.append(f"对象：{target}")
+        if effect and effect != title and effect != target:
+            lines.append(f"操作：{effect}")
+        if self.risk and self.risk.strip():
+            lines.append(f"影响：{self.risk.strip()}")
+        if self.cost_hint and self.cost_hint.strip():
+            lines.append(f"费用：{self.cost_hint.strip()}")
+        for change in self.changes:
+            text = change.strip()
+            if text:
+                lines.append(f"- {text}")
+        return "\n".join(lines)
 
 
 class Interaction(BaseModel):
@@ -115,6 +146,7 @@ class Interaction(BaseModel):
     skip_label: str | None = None
     tool_call_id: str
     resolved: bool = False
+    impact: ApprovalImpact | None = None
 
 
 class ToolContinuation(BaseModel):

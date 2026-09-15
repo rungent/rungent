@@ -1,6 +1,7 @@
 from .agent import Agent, RunActivity
 from .runtime import Runtime
 from .state import (
+    ApprovalImpact,
     DeferredRequest,
     Identity,
     InteractionRequest,
@@ -13,6 +14,7 @@ from .tools import ApprovalPolicy, Tool, ToolContext, ToolEffect, tool
 
 __all__ = [
     "Agent",
+    "ApprovalImpact",
     "ApprovalPolicy",
     "DeferredRequest",
     "Identity",

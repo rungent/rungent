@@ -206,6 +206,25 @@ def create_router(
         except Exception as exc:
             raise translate_error(exc) from exc
 
+    @router.post("/runs/{run_id}/retry")
+    async def retry_run(run_id: str, request: Request):
+        try:
+            resolved_identity = await identity(request)
+            run = await runtime.store.get_run(run_id)
+            session, _ = await runtime.get_session(run.session_id, identity=resolved_identity)
+            resolved_deps = await deps(request, session, run)
+            retried = await runtime.retry_run(
+                run_id,
+                identity=resolved_identity,
+                deps=resolved_deps,
+            )
+        except Exception as exc:
+            raise translate_error(exc) from exc
+        return JSONResponse(
+            status_code=202,
+            content={"run_id": retried.id, "status": retried.status, "retried_from": run_id},
+        )
+
     @router.post("/sessions/{session_id}/runs")
     async def create_run(session_id: str, body: CreateRunRequest, request: Request):
         try:
@@ -213,6 +232,8 @@ def create_router(
             session, _ = await runtime.get_session(session_id, identity=resolved_identity)
             if not body.input.strip():
                 raise ValueError("Run input cannot be empty")
+            # Build deps after a placeholder is not available; dependency_provider
+            # refreshes turn input when the detached worker starts.
             resolved_deps = await deps(request, session)
             run = await runtime.create_run(
                 session_id=session_id,

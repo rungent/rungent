@@ -6,7 +6,7 @@ from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
-from .state import Identity, ToolResult, TrustedInteractionResponse
+from .state import ApprovalImpact, Identity, ToolResult, TrustedInteractionResponse
 
 
 class ToolEffect(StrEnum):
@@ -42,7 +42,7 @@ class ToolContext:
 
 
 ToolFunction = Callable[..., Awaitable[Any]]
-ConfirmationFunction = Callable[..., str | Awaitable[str]]
+ConfirmationFunction = Callable[..., str | ApprovalImpact | Awaitable[str | ApprovalImpact]]
 
 
 def _schema_annotation(annotation: Any) -> Any:
@@ -123,20 +123,43 @@ class Tool:
         ctx: ToolContext,
         arguments: dict[str, Any],
     ) -> str:
+        impact = await self.approval_impact(ctx, arguments)
+        return impact.as_prompt() if impact is not None else ""
+
+    async def approval_impact(
+        self,
+        ctx: ToolContext,
+        arguments: dict[str, Any],
+    ) -> ApprovalImpact | None:
         if self.confirmation is None:
             raise RuntimeError(f"Tool {self.name} has no approval confirmation")
         if isinstance(self.confirmation, str):
-            prompt = self.confirmation.format_map(arguments)
-        else:
-            prompt = self.confirmation(ctx, **self.validate(arguments))
-            if inspect.isawaitable(prompt):
-                prompt = await prompt
-        if not isinstance(prompt, str) or not prompt.strip():
+            prompt = self.confirmation.format_map(arguments).strip()
+            if not prompt:
+                raise ValueError(f"Tool {self.name} produced an empty approval confirmation")
+            if len(prompt) > 2000:
+                raise ValueError(f"Tool {self.name} approval confirmation exceeds 2000 characters")
+            return ApprovalImpact(
+                title=prompt,
+                target_label=prompt,
+                effect=prompt,
+            )
+        result = self.confirmation(ctx, **self.validate(arguments))
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, ApprovalImpact):
+            prompt = result.as_prompt()
+            if not prompt.strip():
+                raise ValueError(f"Tool {self.name} produced an empty approval confirmation")
+            if len(prompt) > 2000:
+                raise ValueError(f"Tool {self.name} approval confirmation exceeds 2000 characters")
+            return result
+        if not isinstance(result, str) or not result.strip():
             raise ValueError(f"Tool {self.name} produced an empty approval confirmation")
-        prompt = prompt.strip()
+        prompt = result.strip()
         if len(prompt) > 2000:
             raise ValueError(f"Tool {self.name} approval confirmation exceeds 2000 characters")
-        return prompt
+        return ApprovalImpact(title=prompt, target_label=prompt, effect=prompt)
 
     async def __call__(self, ctx: ToolContext, **arguments: Any) -> ToolResult:
         validated = self.validate(arguments)

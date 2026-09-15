@@ -1330,6 +1330,22 @@ async def test_rejected_approval_never_executes_tool():
     assert resumed[-1].type == "run.completed"
 
 
+async def test_list_sessions_omits_agents_this_runtime_does_not_serve():
+    store = MemoryStore()
+    runtime = Runtime(
+        agents=[Agent(name="aidy", instructions="Answer.")],
+        model=ScriptedModel([ModelCompleted(text="unused")]),
+        store=store,
+    )
+    identity = Identity(subject_id="owner", tenant_id="tenant")
+    mine = await runtime.create_session(identity=identity, agent_name="aidy")
+    await store.create_session(
+        mine.model_copy(update={"id": "foreign", "agent_name": "assistant", "title": "old"})
+    )
+    listed = await runtime.list_sessions(identity=identity)
+    assert [session.id for session in listed] == [mine.id]
+
+
 async def test_session_ownership_is_enforced():
     runtime = runtime_with([ModelCompleted(text="unused")])
     owner = Identity(subject_id="owner", tenant_id="tenant")
@@ -1583,7 +1599,10 @@ async def test_model_failure_marks_run_failed_with_safe_event(caplog):
         runtime.stream_run(session_id=session.id, content="Hi", identity=identity)
     )
     assert events[-1].type == "run.failed"
-    assert events[-1].data["error"] == "Agent execution failed"
+    assert events[-1].data["error"] == "助手执行失败，请重试或换一种说法。"
+    assert events[-1].data["code"] == "agent_failed"
+    assert events[-1].data["retryable"] is True
+    assert events[-1].data.get("run_id")
     run = await runtime.store.get_run(events[-1].run_id)
     assert run.status == RunStatus.FAILED
     assert "error_type=RuntimeError" in caplog.text
@@ -1688,12 +1707,12 @@ async def test_max_model_steps_terminates_run():
         runtime.stream_run(session_id=session.id, content="Loop", identity=identity)
     )
     assert events[-1].type == "run.failed"
-    assert events[-1].data == {
-        "status": "failed",
-        "code": "model_step_limit_exceeded",
-        "error": "The assistant could not finish this request.",
-        "retryable": True,
-    }
+    assert events[-1].data["status"] == "failed"
+    assert events[-1].data["code"] == "model_step_limit_exceeded"
+    assert events[-1].data["error"] == "本轮步骤过多，未能完成，可以重试。"
+    assert events[-1].data["retryable"] is True
+    assert events[-1].data.get("run_id")
+    assert events[-1].data.get("stage") == "model"
     run = await runtime.store.get_run(events[-1].run_id)
     assert run.error == "Agent exceeded the maximum of 2 model steps"
 

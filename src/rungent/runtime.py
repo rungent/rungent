@@ -54,10 +54,22 @@ _PROGRESS_INSTRUCTIONS = """Public progress updates:
 logger = logging.getLogger(__name__)
 
 _NUMBERED_CHOICE_RE = re.compile(r"(?m)^\s*(?:\d{1,2}[.)、．:：]|[A-Da-d][.)])\s*\S")
+_REFERENT_CUSTOM_RE = re.compile(
+    r"^(它|后者|前者|上一台|下一台|这个|那个|第[一二三四五六七八九十\d]+台?)$"
+)
+_DEFAULT_ERROR_CATALOG = {
+    "agent_failed": "助手执行失败，请重试或换一种说法。",
+    "model_step_timeout": "模型响应超时，可以重试。",
+    "model_step_limit_exceeded": "本轮步骤过多，未能完成，可以重试。",
+    "run_interrupted": "请求被中断，可以重试。",
+    "run_lease_lost": "执行租约丢失，可以重试。",
+}
+_MAX_EMPTY_COMPLETIONS = 3
 
 ExternalTaskCanceller = Callable[[Session, Run, DeferredRequest], Awaitable[None] | None]
 RuntimeEventListener = Callable[[Event], Awaitable[None] | None]
 RunDependencyProvider = Callable[[Session, Run], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
+ErrorCatalog = Mapping[str, str]
 
 
 class ActiveRunConflict(ValueError):
@@ -106,6 +118,7 @@ class Runtime:
         dependency_provider: RunDependencyProvider | None = None,
         event_listener: RuntimeEventListener | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
+        error_catalog: ErrorCatalog | None = None,
     ) -> None:
         if not agents:
             raise ValueError("Runtime needs at least one agent")
@@ -138,11 +151,15 @@ class Runtime:
         self.dependency_provider = dependency_provider
         self.event_listener = event_listener
         self.context_budget_tokens = context_budget_tokens
+        self.error_catalog = {**_DEFAULT_ERROR_CATALOG, **(error_catalog or {})}
         self._session_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._worker_task: asyncio.Task[None] | None = None
         self._worker_id = new_id("worker")
         self._lease_seconds = 30.0
+
+    def _public_error(self, code: str, *, fallback: str | None = None) -> str:
+        return self.error_catalog.get(code) or fallback or self.error_catalog["agent_failed"]
 
     async def create_session(
         self,
@@ -211,16 +228,23 @@ class Runtime:
                 context = await context
             if context:
                 context_text = f"Current context:\n{context}"
-        messages = [
+        prefix = [
             {"role": "system", "content": agent.instructions},
             {"role": "system", "content": _PROGRESS_INSTRUCTIONS},
         ]
         if context_text:
-            messages.append({"role": "system", "content": context_text})
-        messages.extend(conversation)
+            prefix.append({"role": "system", "content": context_text})
         tool_schemas = agent.tool_schemas(
             interaction_response_available=ctx.interaction_response is not None
         )
+        conversation = self._compact_conversation(
+            prefix=prefix,
+            conversation=conversation,
+            tool_schemas=tool_schemas,
+            instructions=agent.instructions,
+            context_text=context_text,
+        )
+        messages = [*prefix, *conversation]
         return _AssembledPrompt(
             messages=messages,
             tool_schemas=tool_schemas,
@@ -234,8 +258,62 @@ class Runtime:
             ),
         )
 
+    def _compact_conversation(
+        self,
+        *,
+        prefix: list[dict[str, Any]],
+        conversation: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        instructions: str,
+        context_text: str,
+    ) -> list[dict[str, Any]]:
+        if not conversation:
+            return conversation
+        usage = estimate_context_usage(
+            instructions=instructions,
+            runtime=_PROGRESS_INSTRUCTIONS,
+            context=context_text,
+            conversation=conversation,
+            tool_schemas=tool_schemas,
+            budget=self.context_budget_tokens,
+        )
+        if not usage.get("overflow"):
+            return conversation
+        kept = list(conversation)
+        while len(kept) > 2 and usage.get("overflow"):
+            drop = 1
+            if kept and kept[0].get("role") == "assistant" and kept[0].get("tool_calls"):
+                drop = 1
+                while drop < len(kept) and kept[drop].get("role") == "tool":
+                    drop += 1
+            elif kept and kept[0].get("role") == "user":
+                drop = 1
+            kept = kept[drop:]
+            usage = estimate_context_usage(
+                instructions=instructions,
+                runtime=_PROGRESS_INSTRUCTIONS,
+                context=context_text,
+                conversation=kept,
+                tool_schemas=tool_schemas,
+                budget=self.context_budget_tokens,
+            )
+        if usage.get("overflow") and kept:
+            summary = {
+                "role": "system",
+                "content": (
+                    "Earlier conversation turns were omitted to fit the context budget. "
+                    "Prefer tools for current facts."
+                ),
+            }
+            return [summary, *kept[-4:]]
+        return kept
+
     async def list_sessions(self, *, identity: Identity) -> list[Session]:
-        return list(await self.store.list_sessions(identity))
+        return [
+            session
+            for session in await self.store.list_sessions(identity)
+            if session.agent_name in self.agents
+        ]
 
     async def set_session_title(
         self, session_id: str, title: str | None, *, identity: Identity
@@ -305,6 +383,38 @@ class Runtime:
         run.event_seq = emitter.sequence
         await self.store.save_run(run)
         return run
+
+    async def retry_run(
+        self,
+        run_id: str,
+        *,
+        identity: Identity,
+        deps: Mapping[str, Any] | None = None,
+    ) -> Run:
+        """Retry a failed retryable run by starting a new run with the same input."""
+        failed = await self.store.get_run(run_id)
+        session = await self.store.get_session(failed.session_id)
+        self._authorize(session, identity)
+        if failed.status is not RunStatus.FAILED:
+            raise ValueError("Only failed runs can be retried")
+        events = await self.store.list_events(run_id, after_seq=0)
+        retryable = False
+        for event in reversed(events):
+            if event.type == "run.failed":
+                retryable = bool(event.data.get("retryable"))
+                break
+        if not retryable:
+            raise ValueError("This failed run is not retryable")
+        content = failed.input.strip()
+        if not content:
+            raise ValueError("Failed run has no input to retry")
+        return await self.create_run(
+            session_id=session.id,
+            content=content,
+            identity=identity,
+            deps=deps,
+            idempotency_key=f"retry:{failed.id}:{new_id('retry')}",
+        )
 
     async def report_external_progress(
         self,
@@ -465,7 +575,12 @@ class Runtime:
                             "run.failed",
                             status=run.status,
                             code="external_task_failed",
-                            error="The external task could not complete.",
+                            stage="tool",
+                            run_id=run.id,
+                            error=self._public_error(
+                                "external_task_failed",
+                                fallback="外部任务未能完成，可以重试。",
+                            ),
                             retryable=True,
                         )
                     )
@@ -568,6 +683,29 @@ class Runtime:
             if run.status is RunStatus.RUNNING:
                 session = await self.store.get_session(run.session_id)
                 emitter = await self._recovered_emitter(session, run)
+                if run.pending_call is not None:
+                    run.status = RunStatus.WAITING_INPUT
+                    run.lease_owner = None
+                    run.lease_expires_at = None
+                    await self.store.save_run(run)
+                    await self._emit(emitter, "run.waiting_input", status=run.status)
+                    await self._emit(
+                        emitter,
+                        "interaction.requested",
+                        **run.pending_call.interaction.model_dump(mode="json"),
+                    )
+                    run.event_seq = emitter.sequence
+                    await self.store.save_run(run)
+                    continue
+                if run.pending_external is not None:
+                    run.status = RunStatus.WAITING_EXTERNAL
+                    run.lease_owner = None
+                    run.lease_expires_at = None
+                    await self.store.save_run(run)
+                    await self._emit(emitter, "run.waiting_external", status=run.status)
+                    run.event_seq = emitter.sequence
+                    await self.store.save_run(run)
+                    continue
                 run.status = RunStatus.FAILED
                 run.error = "Run was interrupted before reaching a durable boundary"
                 run.lease_owner = None
@@ -578,7 +716,9 @@ class Runtime:
                     "run.failed",
                     status=run.status,
                     code="run_interrupted",
-                    error="The request was interrupted and can be retried.",
+                    stage="recovery",
+                    run_id=run.id,
+                    error=self._public_error("run_interrupted"),
                     retryable=True,
                 )
                 run.event_seq = emitter.sequence
@@ -724,7 +864,12 @@ class Runtime:
                     "run.failed",
                     status=run.status,
                     code="run_initialization_failed",
-                    error="The request could not be started.",
+                    stage="model",
+                    run_id=run.id,
+                    error=self._public_error(
+                        "run_initialization_failed",
+                        fallback="请求未能启动，可以重试。",
+                    ),
                     retryable=True,
                 )
             finally:
@@ -1074,17 +1219,16 @@ class Runtime:
             run.error = str(exc)
             await self.store.save_run(run)
             error_code = "model_step_timeout" if isinstance(exc, TimeoutError) else "agent_failed"
+            stage = "timeout" if error_code == "model_step_timeout" else "model"
             yield await self._emit(
                 emitter,
                 "run.failed",
                 status=run.status,
-                error=(
-                    "Model response timed out"
-                    if error_code == "model_step_timeout"
-                    else "Agent execution failed"
-                ),
+                error=self._public_error(error_code),
                 code=error_code,
-                retryable=error_code == "model_step_timeout",
+                stage=stage,
+                run_id=run.id,
+                retryable=True,
             )
 
     async def _drive(
@@ -1107,6 +1251,7 @@ class Runtime:
             deps=deps,
             interaction_response=interaction_response,
         )
+        empty_streak = 0
         while run.model_steps < self.max_model_steps:
             run.model_steps += 1
             step = run.model_steps
@@ -1123,6 +1268,7 @@ class Runtime:
             pending = asyncio.ensure_future(anext(stream))
             step_started_at = asyncio.get_running_loop().time()
             attempt_started_at = step_started_at
+            empty_streak = getattr(self, "_empty_streak", 0)
             wait_delay = self.model_wait_progress_after_seconds
             progress_emitted = run_activity is not None
             wait_updates = 0
@@ -1268,9 +1414,13 @@ class Runtime:
                     yield await self._emit(emitter, "context.usage", **calibrated)
 
             # A few compatible providers occasionally finish a stream without content or calls.
-            # Retry it as a bounded model step instead of returning a successful empty answer.
+            # Empty completions do not burn the model-step budget beyond a small retry streak.
             if outcome == "empty":
+                empty_streak += 1
+                if empty_streak <= _MAX_EMPTY_COMPLETIONS and run.model_steps > 0:
+                    run.model_steps -= 1
                 continue
+            empty_streak = 0
 
             if not completed.tool_calls:
                 await self.store.append_message(
@@ -1448,7 +1598,8 @@ class Runtime:
                 if tool.approval is ApprovalPolicy.ALWAYS:
                     try:
                         validated = tool.normalize(call.arguments)
-                        confirmation = await tool.confirmation_prompt(ctx, validated)
+                        impact = await tool.approval_impact(ctx, validated)
+                        confirmation = impact.as_prompt() if impact is not None else ""
                         call = call.model_copy(update={"arguments": validated})
                     except ValidationError as exc:
                         await self.store.append_message(
@@ -1501,6 +1652,7 @@ class Runtime:
                             InteractionOption(id="reject", label="Reject"),
                         ],
                         tool_call_id=call.id,
+                        impact=impact,
                     )
                     run.status = RunStatus.WAITING_INPUT
                     run.pending_call = PendingCall(
@@ -1531,7 +1683,9 @@ class Runtime:
             "run.failed",
             status=run.status,
             code="model_step_limit_exceeded",
-            error="The assistant could not finish this request.",
+            stage="model",
+            run_id=run.id,
+            error=self._public_error("model_step_limit_exceeded"),
             retryable=True,
         )
 
@@ -1663,6 +1817,7 @@ class Runtime:
                     allow_custom=question.allow_custom,
                     allow_skip=False,
                     value=answers[question.id],
+                    role=question.role,
                 )
             return {"answers": normalized}
 
@@ -1673,6 +1828,7 @@ class Runtime:
             allow_custom=interaction.allow_custom,
             allow_skip=interaction.allow_skip,
             value=value,
+            role=None,
         )
 
     @staticmethod
@@ -1684,6 +1840,7 @@ class Runtime:
         allow_custom: bool,
         allow_skip: bool,
         value: Any,
+        role: str | None = None,
     ) -> Any:
         if kind == "text":
             if not isinstance(value, str) or not value.strip():
@@ -1718,6 +1875,21 @@ class Runtime:
                 raise ValueError("Choice response custom exceeds 1000 characters")
         if custom is not None and not allow_custom:
             raise ValueError("This choice interaction does not allow a custom answer")
+        if custom is not None and role == "operation" and _REFERENT_CUSTOM_RE.fullmatch(custom):
+            raise ValueError(
+                "Referent answers like 它/后者 cannot fill an operation field; "
+                "resolve the resource first"
+            )
+        if (
+            custom is not None
+            and role is None
+            and allow_custom
+            and _REFERENT_CUSTOM_RE.fullmatch(custom)
+        ):
+            raise ValueError(
+                "Referent answers like 它/后者 cannot fill an operation field; "
+                "resolve the resource first"
+            )
         if skipped and (selected or custom is not None):
             raise ValueError("A skipped choice cannot contain another answer")
         answer_count = len(selected) + (1 if custom is not None else 0)

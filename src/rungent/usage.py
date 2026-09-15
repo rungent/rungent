@@ -59,7 +59,18 @@ def parse_provider_usage(raw: dict[str, Any] | None) -> dict[str, int] | None:
 def _percent(used: int, budget: int) -> int:
     if budget <= 0:
         return 0
-    return min(100, int(round(used / budget * 100)))
+    return int(round(used / budget * 100))
+
+
+def _usage_fields(used_tokens: int, budget: int) -> dict[str, Any]:
+    percent = _percent(used_tokens, budget)
+    overflow = used_tokens > budget
+    return {
+        "budget_tokens": budget,
+        "used_tokens": used_tokens,
+        "used_percent": percent,
+        "overflow": overflow,
+    }
 
 
 def _category(category_id: str, tokens: int) -> dict[str, Any]:
@@ -90,9 +101,7 @@ def estimate_context_usage(
     categories = [item for item in categories if item["tokens"] > 0]
     used_tokens = sum(item["tokens"] for item in categories)
     return {
-        "budget_tokens": budget,
-        "used_tokens": used_tokens,
-        "used_percent": _percent(used_tokens, budget),
+        **_usage_fields(used_tokens, budget),
         "categories": categories,
         "source": "estimated",
     }
@@ -123,9 +132,7 @@ def calibrate_context_usage(
         categories = scaled
 
     return {
-        "budget_tokens": budget,
-        "used_tokens": prompt_tokens,
-        "used_percent": _percent(prompt_tokens, budget),
+        **_usage_fields(prompt_tokens, budget),
         "categories": categories,
         "source": "provider",
         "estimated_tokens": est_used,

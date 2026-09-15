@@ -109,6 +109,23 @@ export class RungentClient {
     return this.json(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
   }
 
+  async retry(runId: string): Promise<RunHandle & { readonly retried_from?: string }> {
+    const response = await this.fetcher(
+      `${this.baseUrl}/runs/${encodeURIComponent(runId)}/retry`,
+      { method: 'POST', headers: await this.headers() },
+    );
+    if (!response.ok) {
+      let detail: unknown;
+      try {
+        detail = await response.json();
+      } catch {
+        detail = undefined;
+      }
+      throw new RungentRequestError(response.status, detail);
+    }
+    return response.json() as Promise<RunHandle & { readonly retried_from?: string }>;
+  }
+
   async createRun(
     sessionId: string,
     input: string,
