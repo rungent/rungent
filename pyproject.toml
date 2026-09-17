@@ -1,6 +1,6 @@
 [project]
 name = "rungent"
-version = "0.3.6"
+version = "0.3.7"
 description = "A small, typed agent runtime for Python applications"
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,9 +24,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://rungent.github.io"
 Documentation = "https://rungent.github.io"
-Repository = "https://github.com/rungent/rungent"
-Issues = "https://github.com/rungent/rungent/issues"
-Changelog = "https://github.com/rungent/rungent/releases"
+Repository = "https://acahti.saidc.ai/saidc/rungent"
 
 [project.optional-dependencies]
 fastapi = ["fastapi>=0.115.0"]

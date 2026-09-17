@@ -77,12 +77,13 @@ so the pages repo rebuilds from this repository with its own `GITHUB_TOKEN`.
 
 ## Release
 
-`rungent` (PyPI) and `@rungent/sdk` (npm) share one semver. Publishing is done by GitHub Actions
-on `v*` tags — do not `uv publish` / `npm publish` from your laptop.
+`rungent` and `@rungent/sdk` share one semver and publish to Acahti pkg on `v*`
+tags — do not publish to public PyPI / npm from your laptop.
 
 ```bash
-./scripts/release.sh 0.2.0
-git push origin main --tags
+./scripts/release.sh 0.3.7
+git push acahti main
+git push acahti v0.3.7
 ```
 
-One-time Trusted Publishing setup: see [`RELEASING.md`](RELEASING.md).
+See [`RELEASING.md`](RELEASING.md).

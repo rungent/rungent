@@ -1,20 +1,14 @@
 {
   "name": "@rungent/sdk",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Headless TypeScript SDK for Rungent sessions, runs, interactions, and ACS",
   "type": "module",
   "license": "Apache-2.0",
   "homepage": "https://rungent.github.io",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rungent/rungent.git",
+    "url": "https://acahti.saidc.ai/saidc/rungent.git",
     "directory": "packages/sdk"
-  },
-  "bugs": {
-    "url": "https://github.com/rungent/rungent/issues"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "files": ["dist"],
   "exports": {

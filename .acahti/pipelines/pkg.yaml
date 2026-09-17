@@ -1,0 +1,34 @@
+when:
+  - event: [tag]
+    tag: [v*]
+  - event: [manual]
+
+concurrency:
+  limit: 1
+  group: pkg
+
+labels:
+  build: true
+
+steps:
+  login:
+    pipe: docker-login@v1
+    with:
+      registry: harbor.saidc
+      http: true
+    secrets:
+      DOCKER_USERNAME: harbor_username
+      DOCKER_PASSWORD: harbor_password
+  pypi:
+    depends_on:
+      - login
+    pipe: pypi-publish-acahti@v1
+    with:
+      image: harbor.saidc/base/saidc-uv:0.12.0
+  npm:
+    depends_on:
+      - login
+    pipe: npm-publish-acahti@v1
+    with:
+      path: packages/sdk
+      image: harbor.saidc/base/saidc-node:22-pnpm11.12.0

@@ -76,7 +76,8 @@ git tag -a "v${VERSION}" -m "v${VERSION}"
 
 echo
 echo "Created commit and tag v${VERSION}."
-echo "Push to publish via GitHub Actions:"
-echo "  git push origin main --tags"
+echo "Push to Acahti to publish:"
+echo "  git push acahti main"
+echo "  git push acahti v${VERSION}"
 echo
-echo "Do not run uv publish / npm publish locally."
+echo "Do not publish to pypi.org or registry.npmjs.org."
