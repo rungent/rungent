@@ -1,7 +1,5 @@
 when:
-  - event: [tag]
-    tag: [v*]
-  - event: [manual]
+  - event: [tag, manual]
 
 concurrency:
   limit: 1
