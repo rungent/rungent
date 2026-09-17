@@ -6,14 +6,17 @@ import pytest
 
 from rungent import (
     Agent,
+    ApprovalImpact,
     DeferredRequest,
     Identity,
     InteractionRequest,
     InteractionResponse,
+    ResourceRef,
     RunActivity,
     Runtime,
     ToolContext,
     ToolContinuation,
+    ToolExecution,
     ToolResult,
     tool,
 )
@@ -1982,3 +1985,163 @@ async def test_drive_emits_estimated_then_provider_context_usage():
     assert usages[1].data["used_tokens"] == 80
     assert usages[1].data["prompt_tokens"] == 80
     assert usages[1].data["budget_tokens"] == 200
+
+
+async def test_tool_started_includes_redacted_arguments_and_execution():
+    @tool(effect="read", approval="never")
+    async def lookup(ctx: ToolContext, token: str, city: str) -> ToolResult:
+        """Look up a city."""
+        return ToolResult(
+            data={"city": city},
+            execution=ToolExecution(
+                targets=[ResourceRef(resource_type="CITY", resource_id=city)],
+                request_id="req-1",
+            ),
+        )
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name="lookup",
+                        arguments={"token": "secret", "city": "paris"},
+                    )
+                ]
+            ),
+            ModelCompleted(text="Found"),
+        ],
+        [lookup],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Lookup", identity=identity)
+    )
+    started = next(event for event in events if event.type == "tool.started")
+    assert started.data["arguments"] == {"city": "paris"}
+    assert started.data["execution"]["arguments"] == {"city": "paris"}
+    completed = next(event for event in events if event.type == "tool.completed")
+    assert completed.data["execution"]["targets"] == [
+        {"resource_type": "CITY", "resource_id": "paris"}
+    ]
+    assert completed.data["execution"]["status"] == "succeeded"
+    assert completed.data["execution"]["request_id"] == "req-1"
+    assert completed.data["execution"]["error"] is None
+
+
+async def test_incomplete_write_skips_approval_until_continuation_is_ready():
+    created: list[str] = []
+
+    def ready(*, name: str | None = None) -> bool:
+        return bool(name)
+
+    async def finish_impact(ctx: ToolContext, name: str | None = None) -> ApprovalImpact:
+        answers = {}
+        if ctx.interaction_response is not None and isinstance(
+            ctx.interaction_response.value, dict
+        ):
+            answers = ctx.interaction_response.value.get("answers") or {}
+        label = name or answers.get("name") or "item"
+        return ApprovalImpact(title=f"Create {label}?", target_label=str(label), effect="create")
+
+    @tool(
+        effect="write",
+        approval="always",
+        confirmation=finish_impact,
+        requires_interaction_response=True,
+        title="Finish create",
+    )
+    async def complete_create(ctx: ToolContext, name: str | None = None) -> ToolResult:
+        """Create after the form is complete."""
+        answers = ctx.interaction_response.value["answers"]
+        created.append(str(name or answers["name"]))
+        return ToolResult(message="created")
+
+    @tool(
+        effect="write",
+        approval="always",
+        confirmation="Create {name}?",
+        approval_ready=ready,
+    )
+    async def create_item(ctx: ToolContext, name: str | None = None) -> ToolResult:
+        """Create an item, collecting the name when needed."""
+        if not name:
+            return ToolResult(
+                interaction=InteractionRequest(
+                    kind="form",
+                    prompt="Name?",
+                    questions=[InteractionQuestion(id="name", prompt="Name", kind="text")],
+                    continuation=ToolContinuation(tool="complete_create", arguments={}),
+                )
+            )
+        created.append(name)
+        return ToolResult(message="created")
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(tool_calls=[ToolCall(id="c1", name="create_item", arguments={})]),
+            ModelCompleted(text="Created"),
+        ],
+        [create_item, complete_create],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    first = await collect(
+        runtime.stream_run(session_id=session.id, content="Create", identity=identity)
+    )
+    form = first[-1]
+    assert form.data["kind"] == "form"
+    after_form = await collect(
+        runtime.stream_response(
+            run_id=form.run_id,
+            response=InteractionResponse(
+                interaction_id=form.data["id"],
+                value={"answers": {"name": "box"}},
+            ),
+            identity=identity,
+        )
+    )
+    assert created == []
+    approval = after_form[-1]
+    assert approval.data["kind"] == "approval"
+    assert "Create" in approval.data["prompt"]
+    final = await collect(
+        runtime.stream_response(
+            run_id=approval.run_id,
+            response=InteractionResponse(interaction_id=approval.data["id"], value="approve"),
+            identity=identity,
+        )
+    )
+    assert created == ["box"]
+    assert final[-1].type == "run.completed"
+
+
+async def test_consecutive_invalid_arguments_stop_the_run():
+    @tool(effect="write", approval="never")
+    async def set_day(ctx: ToolContext, day: int) -> ToolResult:
+        """Set a day."""
+        return ToolResult(message="set")
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(
+                tool_calls=[
+                    ToolCall(id="a", name="set_day", arguments={"day": "nope"}),
+                    ToolCall(id="b", name="set_day", arguments={"day": "nope"}),
+                ]
+            )
+        ],
+        [set_day],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Set day", identity=identity)
+    )
+    failed = [event for event in events if event.type == "tool.failed"]
+    assert len(failed) == 2
+    assert "day" in failed[0].data["message"]
+    assert events[-1].type == "run.failed"
+    assert events[-1].data["code"] == "tool_retry_exhausted"

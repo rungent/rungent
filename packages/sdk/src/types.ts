@@ -132,6 +132,27 @@ export interface ProgressActivity {
   readonly createdAt: string;
 }
 
+export interface ResourceRef {
+  readonly resource_type: string;
+  readonly resource_id: string;
+}
+
+export interface ExecutionError {
+  readonly code: string;
+  readonly message: string;
+  readonly fields?: readonly { readonly path: string; readonly message: string }[] | null;
+}
+
+export interface ToolExecution {
+  readonly arguments?: Record<string, unknown>;
+  readonly targets?: readonly ResourceRef[] | null;
+  readonly created_resources?: readonly ResourceRef[] | null;
+  readonly status?: 'accepted' | 'succeeded' | 'failed' | 'unknown';
+  readonly request_id?: string | null;
+  readonly operation_id?: string | null;
+  readonly error?: ExecutionError | null;
+}
+
 export interface ToolActivity {
   readonly id: string;
   readonly kind: 'tool';
@@ -142,6 +163,8 @@ export interface ToolActivity {
   readonly code?: string;
   readonly message?: string;
   readonly public?: unknown;
+  readonly arguments?: Record<string, unknown>;
+  readonly execution?: ToolExecution;
   readonly deduplicated?: boolean;
   readonly createdAt: string;
 }

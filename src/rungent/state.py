@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from .execution import ToolExecution
+
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
@@ -178,6 +180,7 @@ class PendingCall(BaseModel):
     kind: Literal["model", "approval", "continuation"]
     call: ToolCall
     interaction: Interaction
+    trusted_response: "TrustedInteractionResponse | None" = None
 
 
 class PendingExternal(BaseModel):
@@ -197,6 +200,8 @@ class Run(BaseModel):
     lease_expires_at: datetime | None = None
     pending_call: PendingCall | None = None
     pending_external: PendingExternal | None = None
+    tool_fail_key: str | None = None
+    tool_fail_streak: int = 0
     error: str | None = None
     created_at: datetime = Field(default_factory=now)
     updated_at: datetime = Field(default_factory=now)
@@ -220,6 +225,7 @@ class ToolResult(BaseModel):
     data: Any = None
     message: str | None = None
     public: Any = None
+    execution: ToolExecution | None = None
     interaction: InteractionRequest | None = None
     deferred: DeferredRequest | None = None
 

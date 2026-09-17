@@ -43,6 +43,7 @@ class ToolContext:
 
 ToolFunction = Callable[..., Awaitable[Any]]
 ConfirmationFunction = Callable[..., str | ApprovalImpact | Awaitable[str | ApprovalImpact]]
+ApprovalReady = Callable[..., bool | Awaitable[bool]]
 
 
 def _schema_annotation(annotation: Any) -> Any:
@@ -95,6 +96,7 @@ class Tool:
     effect: ToolEffect
     approval: ApprovalPolicy
     confirmation: str | ConfirmationFunction | None
+    approval_ready: ApprovalReady | None
     title: str
     timeout_seconds: float
     parallel: bool
@@ -177,6 +179,7 @@ def tool(
     description: str | None = None,
     title: str | None = None,
     confirmation: str | ConfirmationFunction | None = None,
+    approval_ready: ApprovalReady | None = None,
     timeout_seconds: float = 60,
     parallel: bool = False,
     deduplicate: bool = True,
@@ -200,6 +203,7 @@ def tool(
             effect=ToolEffect(effect),
             approval=approval_policy,
             confirmation=confirmation,
+            approval_ready=approval_ready,
             title=title or tool_name.replace("_", " ").title(),
             timeout_seconds=timeout_seconds,
             parallel=parallel,
@@ -211,11 +215,17 @@ def tool(
 
 
 def validation_error_message(exc: ValidationError) -> str:
-    details = [
+    return __import__("json").dumps(
+        {"error": "invalid_tool_arguments", "details": validation_error_details(exc)},
+        ensure_ascii=False,
+    )
+
+
+def validation_error_details(exc: ValidationError) -> list[dict[str, str]]:
+    return [
         {"path": ".".join(str(part) for part in item["loc"]), "message": item["msg"]}
         for item in exc.errors()
     ]
-    return __import__("json").dumps({"error": "invalid_tool_arguments", "details": details})
 
 
 REQUEST_INPUT_SCHEMA: dict[str, Any] = {

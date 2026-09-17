@@ -1,4 +1,5 @@
 from .agent import Agent, RunActivity
+from .execution import ResourceRef, ToolExecution
 from .runtime import Runtime
 from .state import (
     ApprovalImpact,
@@ -20,12 +21,14 @@ __all__ = [
     "Identity",
     "InteractionRequest",
     "InteractionResponse",
+    "ResourceRef",
     "Runtime",
     "RunActivity",
     "Tool",
     "ToolContext",
     "ToolContinuation",
     "ToolEffect",
+    "ToolExecution",
     "ToolResult",
     "TrustedInteractionResponse",
     "tool",

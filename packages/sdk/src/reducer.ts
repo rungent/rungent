@@ -1,4 +1,4 @@
-import type { Activity, RungentEvent, RungentState, Interaction } from './types';
+import type { Activity, RungentEvent, RungentState, Interaction, ToolActivity } from './types';
 
 export const initialRungentState: RungentState = {
   status: 'idle',
@@ -181,6 +181,14 @@ function applyRungentEvent(state: RungentState, event: RungentEvent): RungentSta
           name: String(event.data.name),
           title: event.data.title ? String(event.data.title) : undefined,
           status: 'running',
+          arguments:
+            event.data.arguments && typeof event.data.arguments === 'object'
+              ? (event.data.arguments as Record<string, unknown>)
+              : undefined,
+          execution:
+            event.data.execution && typeof event.data.execution === 'object'
+              ? (event.data.execution as ToolActivity['execution'])
+              : undefined,
           createdAt: event.created_at,
         })),
       };
@@ -205,6 +213,18 @@ function applyRungentEvent(state: RungentState, event: RungentEvent): RungentSta
           code: event.data.code ? String(event.data.code) : undefined,
           message: event.data.message ? String(event.data.message) : undefined,
           public: event.data.public,
+          arguments:
+            event.data.arguments && typeof event.data.arguments === 'object'
+              ? (event.data.arguments as Record<string, unknown>)
+              : current?.kind === 'tool'
+                ? current.arguments
+                : undefined,
+          execution:
+            event.data.execution && typeof event.data.execution === 'object'
+              ? (event.data.execution as ToolActivity['execution'])
+              : current?.kind === 'tool'
+                ? current.execution
+                : undefined,
           deduplicated: event.data.deduplicated === true,
           createdAt: current?.createdAt ?? event.created_at,
         })),

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from .acs import Event, EventEmitter
 from .agent import Agent, RunActivity
+from .execution import ExecutionError, execution_payload, public_validation_message, redact
 from .llm import Model, ModelCompleted, ModelRetrying, TextDelta
 from .state import (
     DeferredRequest,
@@ -37,7 +38,14 @@ from .state import (
     now,
 )
 from .store import Store
-from .tools import ApprovalPolicy, Tool, ToolContext, ToolEffect, validation_error_message
+from .tools import (
+    ApprovalPolicy,
+    Tool,
+    ToolContext,
+    ToolEffect,
+    validation_error_details,
+    validation_error_message,
+)
 from .usage import (
     DEFAULT_CONTEXT_BUDGET_TOKENS,
     calibrate_context_usage,
@@ -63,8 +71,10 @@ _DEFAULT_ERROR_CATALOG = {
     "model_step_limit_exceeded": "本轮步骤过多，未能完成，可以重试。",
     "run_interrupted": "请求被中断，可以重试。",
     "run_lease_lost": "执行租约丢失，可以重试。",
+    "tool_retry_exhausted": "同一操作连续失败，已停止重试。请修正参数后再试。",
 }
 _MAX_EMPTY_COMPLETIONS = 3
+_MAX_CONSECUTIVE_TOOL_FAILURES = 2
 
 ExternalTaskCanceller = Callable[[Session, Run, DeferredRequest], Awaitable[None] | None]
 RuntimeEventListener = Callable[[Event], Awaitable[None] | None]
@@ -610,6 +620,59 @@ class Runtime:
         sequence = max([run.event_seq, *(event.seq for event in persisted)], default=run.event_seq)
         return EventEmitter(session.id, run.id, sequence=sequence)
 
+    @staticmethod
+    def _tool_failure_key(tool: Tool, arguments: dict[str, Any]) -> str:
+        try:
+            normalized = tool.normalize(arguments)
+        except ValidationError:
+            normalized = arguments
+        return f"{tool.name}:{json.dumps(normalized, sort_keys=True, default=str)}"
+
+    def _note_tool_failure(self, run: Run, tool: Tool, arguments: dict[str, Any]) -> bool:
+        key = self._tool_failure_key(tool, arguments)
+        if run.tool_fail_key == key:
+            run.tool_fail_streak += 1
+        else:
+            run.tool_fail_key = key
+            run.tool_fail_streak = 1
+        return run.tool_fail_streak >= _MAX_CONSECUTIVE_TOOL_FAILURES
+
+    @staticmethod
+    def _clear_tool_failures(run: Run) -> None:
+        run.tool_fail_key = None
+        run.tool_fail_streak = 0
+
+    async def _approval_ready(self, tool: Tool, arguments: dict[str, Any]) -> bool:
+        if tool.approval_ready is None:
+            return True
+        result = tool.approval_ready(**tool.validate(arguments))
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+
+    def _validation_execution(
+        self, arguments: dict[str, Any], exc: ValidationError
+    ) -> tuple[str, dict[str, Any]]:
+        details = validation_error_details(exc)
+        message = public_validation_message(details)
+        error = ExecutionError(code="invalid_arguments", message=message, fields=details)
+        return message, execution_payload(arguments=arguments, status="failed", error=error)
+
+    async def _fail_run_tool_retries(self, run: Run, emitter: EventEmitter) -> Event:
+        run.status = RunStatus.FAILED
+        run.error = "Tool retry exhausted"
+        await self.store.save_run(run)
+        return await self._emit(
+            emitter,
+            "run.failed",
+            status=run.status,
+            code="tool_retry_exhausted",
+            stage="tool",
+            run_id=run.id,
+            error=self._public_error("tool_retry_exhausted"),
+            retryable=False,
+        )
+
     async def _emit(self, emitter: EventEmitter, event_type: str, **data: Any) -> Event:
         event = emitter.emit(event_type, **data)
         await self.store.append_event(event)
@@ -1131,7 +1194,10 @@ class Runtime:
             }
             if approved:
                 tool = self.agents[session.agent_name].tool_map()[call.name]
-                async for event in self._execute_tool(session, run, ctx, tool, call, emitter):
+                exec_ctx = ctx
+                if pending.trusted_response is not None:
+                    exec_ctx = replace(ctx, interaction_response=pending.trusted_response)
+                async for event in self._execute_tool(session, run, exec_ctx, tool, call, emitter):
                     yield event
             else:
                 await self.store.append_message(
@@ -1147,18 +1213,86 @@ class Runtime:
                     ),
                 )
             drive_response = None
-            if run.status == RunStatus.WAITING_INPUT:
+            if run.status in {
+                RunStatus.WAITING_INPUT,
+                RunStatus.WAITING_EXTERNAL,
+                RunStatus.FAILED,
+            }:
                 return
         elif pending.kind == "continuation":
             assert trusted_response is not None
             tool = self.agents[session.agent_name].tool_map()[call.name]
             continuation_ctx = replace(ctx, interaction_response=trusted_response)
-            async for event in self._execute_tool(
-                session, run, continuation_ctx, tool, call, emitter
-            ):
-                yield event
-            drive_response = None
-            if run.status == RunStatus.WAITING_INPUT:
+            if tool.approval is ApprovalPolicy.ALWAYS:
+                try:
+                    validated = tool.normalize(call.arguments)
+                    impact = await tool.approval_impact(continuation_ctx, validated)
+                    confirmation = impact.as_prompt() if impact is not None else ""
+                    call = call.model_copy(update={"arguments": validated})
+                except ValidationError as exc:
+                    message, execution = self._validation_execution(call.arguments, exc)
+                    await self.store.append_message(
+                        session.id,
+                        Message(
+                            role="tool",
+                            content=validation_error_message(exc),
+                            tool_call_id=call.id,
+                            name=tool.name,
+                        ),
+                    )
+                    yield await self._emit(
+                        emitter,
+                        "tool.failed",
+                        call_id=call.id,
+                        name=tool.name,
+                        title=tool.title,
+                        code="invalid_arguments",
+                        message=message,
+                        arguments=redact(call.arguments),
+                        execution=execution,
+                    )
+                    if self._note_tool_failure(run, tool, call.arguments):
+                        yield await self._fail_run_tool_retries(run, emitter)
+                        return
+                    drive_response = None
+                else:
+                    interaction = Interaction(
+                        kind="approval",
+                        prompt=confirmation,
+                        options=[
+                            InteractionOption(id="approve", label="Approve"),
+                            InteractionOption(id="reject", label="Reject"),
+                        ],
+                        tool_call_id=call.id,
+                        impact=impact,
+                    )
+                    run.status = RunStatus.WAITING_INPUT
+                    run.pending_call = PendingCall(
+                        kind="approval",
+                        call=call,
+                        interaction=interaction,
+                        trusted_response=trusted_response,
+                    )
+                    await self.store.save_run(run)
+                    yield await self._emit(emitter, "run.waiting_input", status=run.status)
+                    yield await self._emit(
+                        emitter,
+                        "interaction.requested",
+                        **interaction.model_dump(mode="json"),
+                        tool={"name": tool.name, "title": tool.title, "arguments": call.arguments},
+                    )
+                    return
+            else:
+                async for event in self._execute_tool(
+                    session, run, continuation_ctx, tool, call, emitter
+                ):
+                    yield event
+                drive_response = None
+            if run.status in {
+                RunStatus.WAITING_INPUT,
+                RunStatus.WAITING_EXTERNAL,
+                RunStatus.FAILED,
+            }:
                 return
         else:
             await self.store.append_message(
@@ -1596,6 +1730,11 @@ class Runtime:
                         title=tool.title,
                         message=message,
                         deduplicated=True,
+                        arguments=redact(normalized_call.arguments),
+                        execution=execution_payload(
+                            arguments=normalized_call.arguments,
+                            status="succeeded",
+                        ),
                     )
                     continue
                 call = normalized_call
@@ -1603,10 +1742,10 @@ class Runtime:
                 if tool.approval is ApprovalPolicy.ALWAYS:
                     try:
                         validated = tool.normalize(call.arguments)
-                        impact = await tool.approval_impact(ctx, validated)
-                        confirmation = impact.as_prompt() if impact is not None else ""
                         call = call.model_copy(update={"arguments": validated})
+                        ready = await self._approval_ready(tool, call.arguments)
                     except ValidationError as exc:
+                        message, execution = self._validation_execution(call.arguments, exc)
                         await self.store.append_message(
                             session.id,
                             Message(
@@ -1621,9 +1760,15 @@ class Runtime:
                             "tool.failed",
                             call_id=call.id,
                             name=tool.name,
+                            title=tool.title,
                             code="invalid_arguments",
-                            message="Tool arguments failed validation",
+                            message=message,
+                            arguments=redact(call.arguments),
+                            execution=execution,
                         )
+                        if self._note_tool_failure(run, tool, call.arguments):
+                            yield await self._fail_run_tool_retries(run, emitter)
+                            return
                         continue
                     except Exception as exc:
                         await self.store.append_message(
@@ -1649,33 +1794,69 @@ class Runtime:
                             message="Operation is not ready for approval",
                         )
                         continue
-                    interaction = Interaction(
-                        kind="approval",
-                        prompt=confirmation,
-                        options=[
-                            InteractionOption(id="approve", label="Approve"),
-                            InteractionOption(id="reject", label="Reject"),
-                        ],
-                        tool_call_id=call.id,
-                        impact=impact,
-                    )
-                    run.status = RunStatus.WAITING_INPUT
-                    run.pending_call = PendingCall(
-                        kind="approval", call=call, interaction=interaction
-                    )
-                    await self.store.save_run(run)
-                    yield await self._emit(emitter, "run.waiting_input", status=run.status)
-                    yield await self._emit(
-                        emitter,
-                        "interaction.requested",
-                        **interaction.model_dump(mode="json"),
-                        tool={"name": tool.name, "title": tool.title, "arguments": call.arguments},
-                    )
-                    return
+                    if ready:
+                        try:
+                            impact = await tool.approval_impact(ctx, call.arguments)
+                            confirmation = impact.as_prompt() if impact is not None else ""
+                        except Exception as exc:
+                            await self.store.append_message(
+                                session.id,
+                                Message(
+                                    role="tool",
+                                    content=ToolError(
+                                        code="approval_unavailable",
+                                        message=str(exc),
+                                        retryable=True,
+                                    ).for_model(),
+                                    tool_call_id=call.id,
+                                    name=tool.name,
+                                ),
+                            )
+                            yield await self._emit(
+                                emitter,
+                                "tool.failed",
+                                call_id=call.id,
+                                name=tool.name,
+                                title=tool.title,
+                                code="approval_unavailable",
+                                message="Operation is not ready for approval",
+                            )
+                            continue
+                        interaction = Interaction(
+                            kind="approval",
+                            prompt=confirmation,
+                            options=[
+                                InteractionOption(id="approve", label="Approve"),
+                                InteractionOption(id="reject", label="Reject"),
+                            ],
+                            tool_call_id=call.id,
+                            impact=impact,
+                        )
+                        run.status = RunStatus.WAITING_INPUT
+                        run.pending_call = PendingCall(
+                            kind="approval", call=call, interaction=interaction
+                        )
+                        await self.store.save_run(run)
+                        yield await self._emit(emitter, "run.waiting_input", status=run.status)
+                        yield await self._emit(
+                            emitter,
+                            "interaction.requested",
+                            **interaction.model_dump(mode="json"),
+                            tool={
+                                "name": tool.name,
+                                "title": tool.title,
+                                "arguments": call.arguments,
+                            },
+                        )
+                        return
 
                 async for event in self._execute_tool(session, run, ctx, tool, call, emitter):
                     yield event
-                if run.status in {RunStatus.WAITING_INPUT, RunStatus.WAITING_EXTERNAL}:
+                if run.status in {
+                    RunStatus.WAITING_INPUT,
+                    RunStatus.WAITING_EXTERNAL,
+                    RunStatus.FAILED,
+                }:
                     return
                 if tool.requires_interaction_response:
                     ctx.interaction_response = None
@@ -1920,8 +2101,6 @@ class Runtime:
             raise ValueError(f"Unknown interaction continuation: {request.continuation.tool}")
         if not target.requires_interaction_response:
             raise ValueError("Interaction continuation must require an interaction response")
-        if target.approval is not ApprovalPolicy.NEVER:
-            raise ValueError("Interaction continuation cannot require approval")
         call = ToolCall(
             id=new_id("call"),
             name=target.name,
@@ -1944,8 +2123,16 @@ class Runtime:
         call: ToolCall,
         emitter: EventEmitter,
     ) -> AsyncIterator[Event]:
+        redacted_arguments = redact(call.arguments)
+        started_execution = execution_payload(arguments=call.arguments)
         yield await self._emit(
-            emitter, "tool.started", call_id=call.id, name=tool.name, title=tool.title
+            emitter,
+            "tool.started",
+            call_id=call.id,
+            name=tool.name,
+            title=tool.title,
+            arguments=redacted_arguments,
+            execution=started_execution,
         )
         progress_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
 
@@ -2029,6 +2216,8 @@ class Runtime:
                 ),
             )
             if result.succeeded:
+                self._clear_tool_failures(run)
+                status = "accepted" if result.deferred is not None else "succeeded"
                 yield await self._emit(
                     emitter,
                     "tool.completed",
@@ -2037,6 +2226,12 @@ class Runtime:
                     title=tool.title,
                     message=result.message,
                     public=result.public,
+                    arguments=redacted_arguments,
+                    execution=execution_payload(
+                        arguments=call.arguments,
+                        host=result.execution,
+                        status=status,
+                    ),
                 )
                 if prepared_interaction is not None:
                     continuation, interaction = prepared_interaction
@@ -2058,6 +2253,10 @@ class Runtime:
                         **interaction.model_dump(mode="json"),
                     )
             else:
+                error = ExecutionError(
+                    code="tool_rejected",
+                    message=result.message or "Tool could not complete the operation",
+                )
                 yield await self._emit(
                     emitter,
                     "tool.failed",
@@ -2066,7 +2265,17 @@ class Runtime:
                     title=tool.title,
                     code="tool_rejected",
                     message=result.message or "Tool could not complete the operation",
+                    arguments=redacted_arguments,
+                    execution=execution_payload(
+                        arguments=call.arguments,
+                        host=result.execution,
+                        status="failed",
+                        error=error,
+                    ),
                 )
+                if self._note_tool_failure(run, tool, call.arguments):
+                    yield await self._fail_run_tool_retries(run, emitter)
+                    return
         except ValidationError as exc:
             if progress_message is not None:
                 yield await self._emit(
@@ -2080,6 +2289,7 @@ class Runtime:
                     public=progress_public,
                 )
             content = validation_error_message(exc)
+            message, execution_data = self._validation_execution(call.arguments, exc)
             await self.store.append_message(
                 session.id,
                 Message(role="tool", content=content, tool_call_id=call.id, name=tool.name),
@@ -2091,8 +2301,13 @@ class Runtime:
                 name=tool.name,
                 title=tool.title,
                 code="invalid_arguments",
-                message="Tool arguments failed validation",
+                message=message,
+                arguments=redacted_arguments,
+                execution=execution_data,
             )
+            if self._note_tool_failure(run, tool, call.arguments):
+                yield await self._fail_run_tool_retries(run, emitter)
+                return
         except TimeoutError:
             if progress_message is not None:
                 yield await self._emit(
@@ -2120,7 +2335,16 @@ class Runtime:
                 title=tool.title,
                 code="timeout",
                 message="Tool execution timed out",
+                arguments=redacted_arguments,
+                execution=execution_payload(
+                    arguments=call.arguments,
+                    status="unknown",
+                    error=ExecutionError(code="timeout", message="Tool execution timed out"),
+                ),
             )
+            if self._note_tool_failure(run, tool, call.arguments):
+                yield await self._fail_run_tool_retries(run, emitter)
+                return
         except Exception as exc:
             if progress_message is not None:
                 yield await self._emit(
@@ -2146,7 +2370,16 @@ class Runtime:
                 title=tool.title,
                 code="tool_error",
                 message="Tool execution failed",
+                arguments=redacted_arguments,
+                execution=execution_payload(
+                    arguments=call.arguments,
+                    status="failed",
+                    error=ExecutionError(code="tool_error", message="Tool execution failed"),
+                ),
             )
+            if self._note_tool_failure(run, tool, call.arguments):
+                yield await self._fail_run_tool_retries(run, emitter)
+                return
         finally:
             if execution is not None and not execution.done():
                 execution.cancel()

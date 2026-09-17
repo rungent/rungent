@@ -37,6 +37,12 @@ from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_base
 - `effect` and `approval` must be explicit on every business tool.
 - `approval="always"` requires a concrete `confirmation` string or callable, then freezes and
   gates the exact invocation. Never use a generic title as the approval prompt.
+- `approval_ready` may skip that gate when the invocation still needs a form; a `requires_interaction_response`
+  continuation with `approval="always"` then freezes the completed arguments after the form.
+- Tool ACS events include redacted `arguments` and an `execution` object (`targets`,
+  `created_resources`, `status`, `request_id`, `operation_id`, `error`). Host tools set
+  `ToolResult.execution`. Public validation errors include field paths; the same tool+arguments
+  failing twice in one run stops the loop (`tool_retry_exhausted`).
 - Use one `form` for independent, already-known questions; ask sequentially only when later
   questions depend on earlier answers. Do not ask for approval in plain assistant text.
 - Choice interactions declare `multiple`, `allow_custom`, and safe `allow_skip`; clients submit
@@ -57,7 +63,8 @@ from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_base
 - `Runtime.model_step_timeout_seconds` bounds each provider attempt and
   `model_step_total_timeout_seconds` optionally bounds the complete model step. Retries receive a
   fresh per-attempt budget; timeout persists `run.failed` through the normal terminal path.
-- `ToolResult.data` is model-visible, `message` is safe progress text, and `public` is optional UI data.
+- `ToolResult.data` is model-visible, `message` is safe progress text, `public` is optional UI data,
+  and `execution` is optional redacted resource/request facts copied onto tool events.
 - `ToolResult.interaction` may contain a typed `InteractionRequest` and frozen continuation tool.
   Rungent validates and persists it, then directly invokes the `requires_interaction_response`
   continuation after the user answers without another model step.
