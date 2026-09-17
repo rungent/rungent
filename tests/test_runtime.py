@@ -175,6 +175,38 @@ async def test_plain_response_completes_run_and_persists_messages():
     ]
 
 
+async def test_tool_call_step_resets_streamed_preamble():
+    class PlanningModel:
+        async def stream(self, *, messages, tools, model=None):
+            if any(isinstance(item, dict) and item.get("role") == "tool" for item in messages):
+                yield ModelCompleted(text="当前没有云服务器。")
+                return
+            yield TextDelta("接下来会查询云服务器")
+            yield ModelCompleted(
+                text="接下来会查询云服务器",
+                tool_calls=[ToolCall(id="c1", name="lookup", arguments={})],
+            )
+
+    @tool(effect="read", approval="never")
+    async def lookup(ctx: ToolContext) -> ToolResult:
+        """Look up inventory."""
+        return ToolResult(data={"items": []})
+
+    runtime = Runtime(
+        agents=[Agent(name="assistant", instructions="Use tools.", tools=[lookup])],
+        model=PlanningModel(),
+        store=MemoryStore(),
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="列出云服务器", identity=identity)
+    )
+    types = [event.type for event in events]
+    assert "message.reset" in types
+    assert types.index("message.delta") < types.index("message.reset") < types.index("tool.started")
+
+
 async def test_deferred_tool_waits_without_model_step_and_resumes_once():
     @tool(effect="write", approval="never")
     async def start_job(ctx: ToolContext) -> ToolResult:

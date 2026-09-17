@@ -68,6 +68,8 @@ export interface SessionMessage {
   readonly role: 'system' | 'user' | 'assistant' | 'tool';
   readonly content: string;
   readonly created_at: string;
+  readonly tool_call_id?: string | null;
+  readonly tool_calls?: readonly { readonly id: string; readonly name: string }[];
 }
 
 export interface ContextUsageCategory {

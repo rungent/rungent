@@ -1272,6 +1272,7 @@ class Runtime:
             wait_delay = self.model_wait_progress_after_seconds
             progress_emitted = run_activity is not None
             wait_updates = 0
+            emitted_public_delta = False
             try:
                 while True:
                     now_float = asyncio.get_running_loop().time()
@@ -1334,6 +1335,7 @@ class Runtime:
                     pending = asyncio.ensure_future(anext(stream))
                     wait_delay = self.model_wait_progress_interval_seconds
                     if isinstance(model_event, TextDelta):
+                        emitted_public_delta = True
                         yield await self._emit(emitter, "message.delta", delta=model_event.text)
                     elif isinstance(model_event, ModelRetrying):
                         attempt_started_at = asyncio.get_running_loop().time()
@@ -1433,6 +1435,9 @@ class Runtime:
                     emitter, "run.completed", status=run.status, usage=completed.usage
                 )
                 return
+
+            if emitted_public_delta:
+                yield await self._emit(emitter, "message.reset")
 
             await self.store.append_message(
                 session.id,
