@@ -2061,9 +2061,7 @@ async def test_incomplete_write_skips_approval_until_continuation_is_ready():
 
     @tool(
         effect="write",
-        approval="always",
-        confirmation="Create {name}?",
-        approval_ready=ready,
+        approval="never",
     )
     async def create_item(ctx: ToolContext, name: str | None = None) -> ToolResult:
         """Create an item, collecting the name when needed."""
@@ -2145,3 +2143,132 @@ async def test_consecutive_invalid_arguments_stop_the_run():
     assert "day" in failed[0].data["message"]
     assert events[-1].type == "run.failed"
     assert events[-1].data["code"] == "tool_retry_exhausted"
+
+
+async def test_incomplete_write_never_executes_before_approval():
+    writes = []
+
+    @tool(
+        effect="write", approval="always", confirmation="Create?", approval_ready=lambda **_: False
+    )
+    async def incomplete(ctx: ToolContext) -> ToolResult:
+        """Must never execute until ready."""
+        writes.append(True)
+        return ToolResult(message="created")
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(tool_calls=[ToolCall(id="c1", name="incomplete", arguments={})]),
+            ModelCompleted(text="Prepare first"),
+        ],
+        [incomplete],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Create", identity=identity)
+    )
+    assert writes == []
+    assert not any(event.type == "interaction.requested" for event in events)
+    assert any(
+        event.type == "tool.failed" and event.data["code"] == "approval_unavailable"
+        for event in events
+    )
+
+
+async def test_external_task_resolver_resumes_original_run_once():
+    @tool(effect="read", approval="never")
+    async def watch(ctx: ToolContext) -> ToolResult:
+        """Watch an existing host task."""
+        return ToolResult(deferred=DeferredRequest(task_id="original", message="Waiting"))
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(tool_calls=[ToolCall(id="w", name="watch", arguments={})]),
+            ModelCompleted(text="Finished"),
+        ],
+        [watch],
+    )
+    observed = []
+
+    async def resolver(session, run, task):
+        observed.append(task.task_id)
+        return ToolResult(data={"ok": True})
+
+    runtime.external_task_resolver = resolver
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Watch", identity=identity)
+    )
+    await runtime.resolve_external_tasks()
+    await runtime.resolve_external_tasks()
+    assert observed == ["original"]
+    assert (await runtime.store.get_run(events[-1].run_id)).status is RunStatus.COMPLETED
+
+
+async def test_old_approval_contract_cannot_execute_after_upgrade():
+    writes = []
+
+    @tool(effect="write", approval="always", confirmation="Create frozen draft?")
+    async def commit(ctx: ToolContext, draft: str) -> ToolResult:
+        """Commit a frozen host draft."""
+        writes.append(draft)
+        return ToolResult(message="created")
+
+    runtime = runtime_with(
+        [ModelCompleted(tool_calls=[ToolCall(id="c", name="commit", arguments={"draft": "d"})])],
+        [commit],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Create", identity=identity)
+    )
+    interaction = next(event for event in events if event.type == "interaction.requested")
+    runtime.approval_revision = "new-contract"
+    with pytest.raises(ValueError, match="Approval contract changed"):
+        await runtime.submit_response(
+            run_id=interaction.run_id,
+            response=InteractionResponse(interaction_id=interaction.data["id"], value=True),
+            identity=identity,
+        )
+    assert not writes
+    assert (await runtime.store.get_run(interaction.run_id)).status is RunStatus.FAILED
+
+
+async def test_two_workers_cannot_consume_the_same_approval_twice():
+    writes = []
+
+    @tool(effect="write", approval="always", confirmation="Commit draft d?")
+    async def commit(ctx: ToolContext) -> ToolResult:
+        """Record one resource submission."""
+        writes.append(ctx.run_id)
+        return ToolResult(message="created")
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(tool_calls=[ToolCall(id="c", name="commit", arguments={})]),
+            ModelCompleted(text="Done"),
+        ],
+        [commit],
+    )
+    other = runtime_with([ModelCompleted(text="Done")], [commit])
+    other.store = runtime.store
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Create", identity=identity)
+    )
+    approval = next(event for event in events if event.type == "interaction.requested")
+    response = InteractionResponse(interaction_id=approval.data["id"], value=True)
+    answers = await asyncio.gather(
+        *(
+            worker.submit_response(run_id=approval.run_id, response=response, identity=identity)
+            for worker in (runtime, other)
+        ),
+        return_exceptions=True,
+    )
+    await asyncio.gather(*runtime._run_tasks.values(), *other._run_tasks.values())
+    assert sum(isinstance(answer, ValueError) for answer in answers) == 1
+    assert writes == [approval.run_id]

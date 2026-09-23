@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     or_,
     select,
+    true,
     update,
 )
 from sqlalchemy.engine import CursorResult
@@ -258,6 +259,13 @@ class SQLAlchemyStore:
             ).scalar_one_or_none()
             return None if row is None else Run.model_validate(row.payload)
 
+    async def list_waiting_external_runs(self) -> Sequence[Run]:
+        async with self.sessions() as db:
+            rows = (
+                await db.execute(select(RunRow).where(RunRow.status == RunStatus.WAITING_EXTERNAL))
+            ).scalars()
+            return [Run.model_validate(row.payload) for row in rows]
+
     async def list_recoverable_runs(self) -> Sequence[Run]:
         async with self.sessions() as db:
             current = now()
@@ -286,6 +294,7 @@ class SQLAlchemyStore:
         lease_seconds: float,
         *,
         expected_status: RunStatus = RunStatus.QUEUED,
+        expected_event_seq: int | None = None,
     ) -> Run | None:
         async with self.sessions.begin() as db:
             row = await db.get(RunRow, run_id)
@@ -300,7 +309,13 @@ class SQLAlchemyStore:
                 CursorResult[Any],
                 await db.execute(
                     update(RunRow)
-                    .where(RunRow.id == run_id, RunRow.status == expected_status)
+                    .where(
+                        RunRow.id == run_id,
+                        RunRow.status == expected_status,
+                        true()
+                        if expected_event_seq is None
+                        else RunRow.payload["event_seq"].as_integer() == expected_event_seq,
+                    )
                     .values(
                         status=run.status,
                         lease_owner=owner,

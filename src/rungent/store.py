@@ -37,6 +37,8 @@ class Store(Protocol):
 
     async def list_recoverable_runs(self) -> Sequence[Run]: ...
 
+    async def list_waiting_external_runs(self) -> Sequence[Run]: ...
+
     async def claim_run(
         self,
         run_id: str,
@@ -44,6 +46,7 @@ class Store(Protocol):
         lease_seconds: float,
         *,
         expected_status: RunStatus = RunStatus.QUEUED,
+        expected_event_seq: int | None = None,
     ) -> Run | None: ...
 
     async def renew_run_lease(self, run_id: str, owner: str, lease_seconds: float) -> bool: ...
@@ -151,6 +154,13 @@ class MemoryStore:
                 return run.model_copy(deep=True)
         return None
 
+    async def list_waiting_external_runs(self) -> Sequence[Run]:
+        return [
+            run.model_copy(deep=True)
+            for run in self.runs.values()
+            if run.status is RunStatus.WAITING_EXTERNAL
+        ]
+
     async def list_recoverable_runs(self) -> Sequence[Run]:
         current = now()
         return [
@@ -170,12 +180,15 @@ class MemoryStore:
         lease_seconds: float,
         *,
         expected_status: RunStatus = RunStatus.QUEUED,
+        expected_event_seq: int | None = None,
     ) -> Run | None:
         async with self._lock:
             run = self.runs.get(run_id)
             if run is None:
                 raise KeyError(f"Unknown run: {run_id}")
-            if run.status is not expected_status:
+            if run.status is not expected_status or (
+                expected_event_seq is not None and run.event_seq != expected_event_seq
+            ):
                 return None
             claimed = run.model_copy(deep=True)
             claimed.status = RunStatus.RUNNING

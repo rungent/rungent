@@ -76,6 +76,7 @@ _DEFAULT_ERROR_CATALOG = {
 _MAX_EMPTY_COMPLETIONS = 3
 _MAX_CONSECUTIVE_TOOL_FAILURES = 2
 
+ExternalTaskResolver = Callable[[Session, Run, DeferredRequest], Awaitable[ToolResult | None]]
 ExternalTaskCanceller = Callable[[Session, Run, DeferredRequest], Awaitable[None] | None]
 RuntimeEventListener = Callable[[Event], Awaitable[None] | None]
 RunDependencyProvider = Callable[[Session, Run], Mapping[str, Any] | Awaitable[Mapping[str, Any]]]
@@ -125,6 +126,8 @@ class Runtime:
         model_step_timeout_seconds: float | None = None,
         model_step_total_timeout_seconds: float | None = None,
         external_task_canceller: ExternalTaskCanceller | None = None,
+        external_task_resolver: ExternalTaskResolver | None = None,
+        approval_revision: str = "1",
         dependency_provider: RunDependencyProvider | None = None,
         event_listener: RuntimeEventListener | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
@@ -158,6 +161,8 @@ class Runtime:
         self.model_step_timeout_seconds = model_step_timeout_seconds
         self.model_step_total_timeout_seconds = model_step_total_timeout_seconds
         self.external_task_canceller = external_task_canceller
+        self.external_task_resolver = external_task_resolver
+        self.approval_revision = approval_revision
         self.dependency_provider = dependency_provider
         self.event_listener = event_listener
         self.context_budget_tokens = context_budget_tokens
@@ -415,6 +420,22 @@ class Runtime:
                 break
         if not retryable:
             raise ValueError("This failed run is not retryable")
+        tool_map = self.agents[session.agent_name].tool_map()
+        if any(
+            event.type == "tool.started"
+            and (
+                event.data.get("approval") == "always"
+                and event.data.get("effect") != "read"
+                or (tool := tool_map.get(str(event.data.get("name")))) is not None
+                and tool.approval is ApprovalPolicy.ALWAYS
+                and tool.effect is not ToolEffect.READ
+            )
+            for event in events
+        ):
+            raise ValueError(
+                "A write may have been submitted; recover its original business operation "
+                "instead of replaying the run"
+            )
         content = failed.input.strip()
         if not content:
             raise ValueError("Failed run has no input to retry")
@@ -546,6 +567,9 @@ class Runtime:
                         call_id=pending.call.id,
                         name=tool.name,
                         title=tool.title,
+                        execution=result.execution.model_dump(mode="json")
+                        if result.execution
+                        else None,
                         code=None if result.succeeded else "external_task_failed",
                         message=result.message,
                         public=result.public,
@@ -648,7 +672,11 @@ class Runtime:
         result = tool.approval_ready(**tool.validate(arguments))
         if inspect.isawaitable(result):
             result = await result
-        return bool(result)
+        if not result:
+            raise ValueError(
+                "Operation is incomplete; prepare configuration before requesting approval"
+            )
+        return True
 
     def _validation_execution(
         self, arguments: dict[str, Any], exc: ValidationError
@@ -674,6 +702,15 @@ class Runtime:
         )
 
     async def _emit(self, emitter: EventEmitter, event_type: str, **data: Any) -> Event:
+        if event_type == "run.failed" and data.get("retryable"):
+            events = await self.store.list_events(emitter.run_id, after_seq=0)
+            if any(
+                item.type == "tool.started"
+                and item.data.get("approval") == "always"
+                and item.data.get("effect") != "read"
+                for item in events
+            ):
+                data["retryable"] = False
         event = emitter.emit(event_type, **data)
         await self.store.append_event(event)
         if self.event_listener is not None:
@@ -789,6 +826,32 @@ class Runtime:
                 continue
             self._schedule_run(run.id)
 
+    async def resolve_external_tasks(self) -> None:
+        """Poll host-owned tasks read-only; resume_deferred atomically claims each result."""
+        if self.external_task_resolver is None:
+            return
+        for run in await self.store.list_waiting_external_runs():
+            if run.pending_external is None:
+                continue
+            session = await self.store.get_session(run.session_id)
+            try:
+                result = await self.external_task_resolver(session, run, run.pending_external.task)
+                if result is not None:
+                    await self.resume_deferred(
+                        run.id,
+                        run.pending_external.task.task_id,
+                        result=result,
+                        identity=Identity(
+                            subject_id=session.subject_id, tenant_id=session.tenant_id
+                        ),
+                    )
+            except Exception:
+                # A polling failure must preserve the binding, never replay the write.
+                logging.getLogger(__name__).exception(
+                    "External task resolution failed for run %s", run.id
+                )
+                continue
+
     async def start_worker(self) -> None:
         """Start the lightweight SQL-backed recovery monitor."""
         if self._worker_task is not None and not self._worker_task.done():
@@ -797,6 +860,7 @@ class Runtime:
         async def monitor() -> None:
             while True:
                 await self.recover_runs()
+                await self.resolve_external_tasks()
                 await asyncio.sleep(5)
 
         await self.recover_runs()
@@ -1061,6 +1125,7 @@ class Runtime:
             task = asyncio.current_task()
             if task is not None:
                 self._run_tasks[run.id] = task
+            heartbeat = asyncio.create_task(self._renew_lease(run.id))
             try:
                 yield accepted.event
                 async for event in self._continue_accepted(
@@ -1072,10 +1137,14 @@ class Runtime:
                 ):
                     yield event
             finally:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
                 if self._run_tasks.get(run.id) is task:
                     self._run_tasks.pop(run.id, None)
                 run.event_seq = accepted.emitter.sequence
                 await self.store.save_run(run)
+                await self.store.release_run_lease(run.id, self._worker_id)
 
     async def submit_response(
         self,
@@ -1105,6 +1174,7 @@ class Runtime:
                     task = asyncio.current_task()
                     if task is not None:
                         self._run_tasks[run_id] = task
+                    heartbeat = asyncio.create_task(self._renew_lease(run.id))
                     try:
                         async for _event in self._continue_accepted(
                             session,
@@ -1115,13 +1185,23 @@ class Runtime:
                         ):
                             pass
                     finally:
+                        heartbeat.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await heartbeat
                         if self._run_tasks.get(run_id) is task:
                             self._run_tasks.pop(run_id, None)
                         run.event_seq = accepted.emitter.sequence
                         await self.store.save_run(run)
+                        await self.store.release_run_lease(run.id, self._worker_id)
 
             self._run_tasks[run_id] = asyncio.create_task(consume())
         return run
+
+    async def _renew_lease(self, run_id: str) -> None:
+        while True:
+            await asyncio.sleep(self._lease_seconds / 3)
+            if not await self.store.renew_run_lease(run_id, self._worker_id, self._lease_seconds):
+                return
 
     async def _accept_interaction(
         self,
@@ -1135,7 +1215,30 @@ class Runtime:
             raise ValueError("Run is not waiting for input")
         if pending.interaction.id != response.interaction_id:
             raise ValueError("Interaction does not belong to this run")
+        if pending.kind == "approval" and pending.approval_revision != self.approval_revision:
+            run.status = RunStatus.FAILED
+            run.error = (
+                "Approval contract changed; prepare configuration and request approval again"
+            )
+            run.pending_call = None
+            emitter = EventEmitter(session.id, run.id, sequence=run.event_seq)
+            await self._emit(
+                emitter, "run.failed", status=run.status, error=run.error, retryable=False
+            )
+            run.event_seq = emitter.sequence
+            await self.store.save_run(run)
+            raise ValueError(run.error)
         response_value = self._normalize_interaction_response(pending.interaction, response.value)
+        claimed = await self.store.claim_run(
+            run.id,
+            self._worker_id,
+            self._lease_seconds,
+            expected_status=RunStatus.WAITING_INPUT,
+            expected_event_seq=run.event_seq,
+        )
+        if claimed is None:
+            raise ValueError("Interaction was already answered or changed")
+        run.lease_owner, run.lease_expires_at = claimed.lease_owner, claimed.lease_expires_at
         emitter = EventEmitter(session.id, run.id, sequence=run.event_seq)
         pending.interaction.resolved = True
         event = await self._emit(
@@ -1226,8 +1329,6 @@ class Runtime:
             if tool.approval is ApprovalPolicy.ALWAYS:
                 try:
                     validated = tool.normalize(call.arguments)
-                    impact = await tool.approval_impact(continuation_ctx, validated)
-                    confirmation = impact.as_prompt() if impact is not None else ""
                     call = call.model_copy(update={"arguments": validated})
                 except ValidationError as exc:
                     message, execution = self._validation_execution(call.arguments, exc)
@@ -1256,32 +1357,66 @@ class Runtime:
                         return
                     drive_response = None
                 else:
-                    interaction = Interaction(
-                        kind="approval",
-                        prompt=confirmation,
-                        options=[
-                            InteractionOption(id="approve", label="Approve"),
-                            InteractionOption(id="reject", label="Reject"),
-                        ],
-                        tool_call_id=call.id,
-                        impact=impact,
-                    )
-                    run.status = RunStatus.WAITING_INPUT
-                    run.pending_call = PendingCall(
-                        kind="approval",
-                        call=call,
-                        interaction=interaction,
-                        trusted_response=trusted_response,
-                    )
-                    await self.store.save_run(run)
-                    yield await self._emit(emitter, "run.waiting_input", status=run.status)
-                    yield await self._emit(
-                        emitter,
-                        "interaction.requested",
-                        **interaction.model_dump(mode="json"),
-                        tool={"name": tool.name, "title": tool.title, "arguments": call.arguments},
-                    )
-                    return
+                    try:
+                        await self._approval_ready(tool, validated)
+                        impact = await tool.approval_impact(continuation_ctx, validated)
+                        confirmation = impact.as_prompt() if impact is not None else ""
+                    except Exception as exc:
+                        await self.store.append_message(
+                            session.id,
+                            Message(
+                                role="tool",
+                                content=ToolError(
+                                    code="approval_unavailable",
+                                    message=str(exc),
+                                    retryable=True,
+                                ).for_model(),
+                                tool_call_id=call.id,
+                                name=tool.name,
+                            ),
+                        )
+                        yield await self._emit(
+                            emitter,
+                            "tool.failed",
+                            call_id=call.id,
+                            name=tool.name,
+                            title=tool.title,
+                            code="approval_unavailable",
+                            message="Operation is not ready for approval",
+                        )
+                        drive_response = None
+                    else:
+                        interaction = Interaction(
+                            kind="approval",
+                            prompt=confirmation,
+                            options=[
+                                InteractionOption(id="approve", label="Approve"),
+                                InteractionOption(id="reject", label="Reject"),
+                            ],
+                            tool_call_id=call.id,
+                            impact=impact,
+                        )
+                        run.status = RunStatus.WAITING_INPUT
+                        run.pending_call = PendingCall(
+                            kind="approval",
+                            approval_revision=self.approval_revision,
+                            call=call,
+                            interaction=interaction,
+                            trusted_response=trusted_response,
+                        )
+                        await self.store.save_run(run)
+                        yield await self._emit(emitter, "run.waiting_input", status=run.status)
+                        yield await self._emit(
+                            emitter,
+                            "interaction.requested",
+                            **interaction.model_dump(mode="json"),
+                            tool={
+                                "name": tool.name,
+                                "title": tool.title,
+                                "arguments": call.arguments,
+                            },
+                        )
+                        return
             else:
                 async for event in self._execute_tool(
                     session, run, continuation_ctx, tool, call, emitter
@@ -1743,7 +1878,9 @@ class Runtime:
                     try:
                         validated = tool.normalize(call.arguments)
                         call = call.model_copy(update={"arguments": validated})
-                        ready = await self._approval_ready(tool, call.arguments)
+                        await self._approval_ready(tool, call.arguments)
+                        impact = await tool.approval_impact(ctx, call.arguments)
+                        confirmation = impact.as_prompt() if impact is not None else ""
                     except ValidationError as exc:
                         message, execution = self._validation_execution(call.arguments, exc)
                         await self.store.append_message(
@@ -1794,61 +1931,36 @@ class Runtime:
                             message="Operation is not ready for approval",
                         )
                         continue
-                    if ready:
-                        try:
-                            impact = await tool.approval_impact(ctx, call.arguments)
-                            confirmation = impact.as_prompt() if impact is not None else ""
-                        except Exception as exc:
-                            await self.store.append_message(
-                                session.id,
-                                Message(
-                                    role="tool",
-                                    content=ToolError(
-                                        code="approval_unavailable",
-                                        message=str(exc),
-                                        retryable=True,
-                                    ).for_model(),
-                                    tool_call_id=call.id,
-                                    name=tool.name,
-                                ),
-                            )
-                            yield await self._emit(
-                                emitter,
-                                "tool.failed",
-                                call_id=call.id,
-                                name=tool.name,
-                                title=tool.title,
-                                code="approval_unavailable",
-                                message="Operation is not ready for approval",
-                            )
-                            continue
-                        interaction = Interaction(
-                            kind="approval",
-                            prompt=confirmation,
-                            options=[
-                                InteractionOption(id="approve", label="Approve"),
-                                InteractionOption(id="reject", label="Reject"),
-                            ],
-                            tool_call_id=call.id,
-                            impact=impact,
-                        )
-                        run.status = RunStatus.WAITING_INPUT
-                        run.pending_call = PendingCall(
-                            kind="approval", call=call, interaction=interaction
-                        )
-                        await self.store.save_run(run)
-                        yield await self._emit(emitter, "run.waiting_input", status=run.status)
-                        yield await self._emit(
-                            emitter,
-                            "interaction.requested",
-                            **interaction.model_dump(mode="json"),
-                            tool={
-                                "name": tool.name,
-                                "title": tool.title,
-                                "arguments": call.arguments,
-                            },
-                        )
-                        return
+                    interaction = Interaction(
+                        kind="approval",
+                        prompt=confirmation,
+                        options=[
+                            InteractionOption(id="approve", label="Approve"),
+                            InteractionOption(id="reject", label="Reject"),
+                        ],
+                        tool_call_id=call.id,
+                        impact=impact,
+                    )
+                    run.status = RunStatus.WAITING_INPUT
+                    run.pending_call = PendingCall(
+                        kind="approval",
+                        approval_revision=self.approval_revision,
+                        call=call,
+                        interaction=interaction,
+                    )
+                    await self.store.save_run(run)
+                    yield await self._emit(emitter, "run.waiting_input", status=run.status)
+                    yield await self._emit(
+                        emitter,
+                        "interaction.requested",
+                        **interaction.model_dump(mode="json"),
+                        tool={
+                            "name": tool.name,
+                            "title": tool.title,
+                            "arguments": call.arguments,
+                        },
+                    )
+                    return
 
                 async for event in self._execute_tool(session, run, ctx, tool, call, emitter):
                     yield event
@@ -2133,6 +2245,8 @@ class Runtime:
             title=tool.title,
             arguments=redacted_arguments,
             execution=started_execution,
+            effect=tool.effect.value,
+            approval=tool.approval.value,
         )
         progress_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
 

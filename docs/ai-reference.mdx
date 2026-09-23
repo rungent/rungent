@@ -37,8 +37,15 @@ from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_base
 - `effect` and `approval` must be explicit on every business tool.
 - `approval="always"` requires a concrete `confirmation` string or callable, then freezes and
   gates the exact invocation. Never use a generic title as the approval prompt.
-- `approval_ready` may skip that gate when the invocation still needs a form; a `requires_interaction_response`
-  continuation with `approval="always"` then freezes the completed arguments after the form.
+- Preparation tools merge trusted form answers in host code and have no resource side effects.
+  `approval_ready=False` rejects the call; it never executes a write to discover missing fields.
+  A separate approved commit tool accepts an immutable host draft identity and revision.
+- `Runtime(approval_revision="1")` binds pending approvals to the host contract revision. Change it
+  when deploying incompatible tool contracts. Old approvals fail without executing a tool.
+- `Runtime(external_task_resolver=...)` polls host tasks read-only and resumes the original Run.
+  The callback receives `(Session, Run, DeferredRequest)` and returns `ToolResult | None`.
+  It must never submit a new resource operation. Write failures do not permit Run replay.
+
 - Tool ACS events include redacted `arguments` and an `execution` object (`targets`,
   `created_resources`, `status`, `request_id`, `operation_id`, `error`). Host tools set
   `ToolResult.execution`. Public validation errors include field paths; the same tool+arguments
@@ -157,3 +164,9 @@ standard custom-answer row. Tool activities expose their stable failure `code` t
 `run.failed` may include a stable `code` and `retryable` flag. Bounded-loop exhaustion uses
 `model_step_limit_exceeded`; the TypeScript reducer projects these fields as `errorCode` and
 `retryable`, while the configured numeric limit remains internal.
+
+Custom stores must implement `list_waiting_external_runs(limit=...)` for deferred recovery.
+`claim_run(..., expected_status=..., expected_event_seq=...)` must atomically compare both
+status and event sequence before acquiring the lease. Interaction responses use this
+compare-and-set boundary so an old answer cannot consume a newer form or approval.
+Business configuration, validation and operation state remain host-owned.

@@ -181,6 +181,7 @@ class PendingCall(BaseModel):
     call: ToolCall
     interaction: Interaction
     trusted_response: "TrustedInteractionResponse | None" = None
+    approval_revision: str | None = None
 
 
 class PendingExternal(BaseModel):

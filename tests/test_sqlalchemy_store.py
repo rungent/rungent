@@ -88,3 +88,32 @@ async def test_claim_run_atomically_transitions_expected_status():
     assert claimed.lease_owner == "worker-1"
     assert duplicate is None
     await engine.dispose()
+
+
+async def test_stale_interaction_sequence_cannot_claim_a_new_form():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(RungentBase.metadata.create_all)
+    store = SQLAlchemyStore(async_sessionmaker(engine, expire_on_commit=False))
+    session = Session(agent_name="agent", subject_id="user")
+    await store.create_session(session)
+    run = Run(session_id=session.id, status=RunStatus.WAITING_INPUT, event_seq=7)
+    await store.create_run(run)
+    assert (
+        await store.claim_run(
+            run.id, "stale", 30, expected_status=RunStatus.WAITING_INPUT, expected_event_seq=6
+        )
+        is None
+    )
+    assert (await store.get_run(run.id)).status is RunStatus.WAITING_INPUT
+    claimed = await store.claim_run(
+        run.id, "current", 30, expected_status=RunStatus.WAITING_INPUT, expected_event_seq=7
+    )
+    assert claimed is not None
+    assert (
+        await store.claim_run(
+            run.id, "duplicate", 30, expected_status=RunStatus.WAITING_INPUT, expected_event_seq=7
+        )
+        is None
+    )
+    await engine.dispose()

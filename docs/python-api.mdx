@@ -166,3 +166,14 @@ model = OpenAICompatibleModel(
 The backoff is exponential and capped at eight seconds. HTTP 400-class errors other than 408 and
 429 are not retried. Pass `extra_body` for trusted provider-specific top-level fields; it cannot
 override Rungent's core request.
+
+### Approval and external task recovery
+
+`Runtime(approval_revision="1", external_task_resolver=None)` accepts a host approval contract
+revision and an optional async `(Session, Run, DeferredRequest) -> ToolResult | None` resolver.
+`start_worker()` polls persisted waiting tasks; `resolve_external_tasks()` is also available for
+host schedulers. Return `None` while pending, and a result only for a known terminal outcome.
+Resolver errors retain the original task. The host owns business reconciliation and idempotency.
+Old pending approvals without the current revision are invalidated without resource writes.
+`tool.started` records `effect` and `approval`; failed runs after approved writes expose
+`retryable=false`. SDKs must preserve that flag and never offer blind write replay.

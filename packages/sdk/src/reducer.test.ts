@@ -267,3 +267,18 @@ describe('reduceRungentEvent', () => {
     expect(state.activities[0]).toMatchObject({ status: 'completed' });
   });
 });
+
+it('preserves a non-retryable write failure and its original operation', () => {
+  let state = reduceRungentEvent(initialRungentState, event('tool.started', 1, { call_id: 'c', name: 'commit', effect: 'write', approval: 'always' }));
+  state = reduceRungentEvent(state, event('tool.failed', 2, { call_id: 'c', name: 'commit', execution: { status: 'unknown', operation_id: 'original' } }));
+  state = reduceRungentEvent(state, event('run.failed', 3, { error: 'Outcome unknown; reconcile original', retryable: false }));
+  expect(state.retryable).toBe(false);
+  expect(state.status).toBe('failed');
+});
+
+it('retains structured approval changes independently from the title', () => {
+  const state = reduceRungentEvent(initialRungentState, event('interaction.requested', 1, {
+    id: 'approval', kind: 'approval', prompt: 'Confirm', impact: { title: 'Create VM', target_label: 'chosen', effect: 'create', changes: ['Memory: 103.08 GB', 'Disk: 100.93 GB'] },
+  }));
+  expect(state.interaction?.impact?.changes).toEqual(['Memory: 103.08 GB', 'Disk: 100.93 GB']);
+});
