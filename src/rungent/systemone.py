@@ -172,10 +172,21 @@ async def shortlist_tools(
     if pick_confidence < client.settings.confidence_threshold or not winner:
         return {item.name for item in candidates[: client.settings.max_tools]}
 
+    winner_tokens = set(winner.split("_"))
+
+    def _affinity(tool: Tool) -> tuple[int, int]:
+        # Prefer same create-draft / power family as the winner before unrelated domain ops.
+        shared = len(winner_tokens & set(tool.name.split("_")))
+        return (-shared, candidates.index(tool))
+
     ordered = [winner]
-    for item in candidates:
-        if item.name != winner and len(ordered) < client.settings.max_tools:
-            ordered.append(item.name)
+    for item in sorted(
+        (tool for tool in candidates if tool.name != winner),
+        key=_affinity,
+    ):
+        if len(ordered) >= client.settings.max_tools:
+            break
+        ordered.append(item.name)
     return set(ordered)
 
 

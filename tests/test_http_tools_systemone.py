@@ -95,6 +95,72 @@ async def test_shortlist_picks_domain_tools():
 
 
 @pytest.mark.asyncio
+async def test_shortlist_prefers_name_affinity_within_max_tools():
+    settings = SystemOneSettings(
+        base_url="http://systemone.test",
+        confidence_threshold=0.5,
+        max_tools=4,
+    )
+    client = SystemOneClient(settings)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        questions = payload["questions"]
+        if "needs_tool" in questions:
+            return httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "needs_tool": {"type": "noul", "noul": 0.9},
+                        "domain": {
+                            "type": "choice",
+                            "choice": "vm",
+                            "confidence": 0.9,
+                            "probabilities": {"vm": 0.9},
+                        },
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "tool": {
+                        "type": "choice",
+                        "choice": "create_vm_draft",
+                        "confidence": 0.95,
+                        "probabilities": {"create_vm_draft": 0.95},
+                    }
+                }
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client._client = httpx.AsyncClient(base_url=settings.base_url, transport=transport)
+    client._owns_client = True
+
+    names = await shortlist_tools(
+        client,
+        tools=[
+            _tool("list_zones", "vm"),
+            _tool("list_vms", "vm"),
+            _tool("get_vm", "vm"),
+            _tool("create_vm_draft", "vm"),
+            _tool("prepare_vm_draft", "vm"),
+            _tool("commit_vm_draft", "vm"),
+        ],
+        user_input="创建一台云服务器",
+        recent_tool_names=[],
+    )
+    assert names is not None
+    assert "create_vm_draft" in names
+    assert "prepare_vm_draft" in names
+    assert "commit_vm_draft" in names
+    assert "list_zones" not in names
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_shortlist_low_confidence_degrades_to_full_catalog():
     settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.6)
     client = SystemOneClient(settings)
