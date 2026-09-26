@@ -1,5 +1,9 @@
 # Rungent integration guide for coding agents
 
+**Preferred host path (0.4+):** `create_openapi_runtime` + allowlist/OpenAPI HTTP tools + optional
+`SystemOneSettings.from_env()` for per-step shortlisting. Hand-written `@tool` remains available
+for product-specific intents. See `docs/http-tools.mdx` and `docs/systemone.mdx`.
+
 This is the canonical short context for an AI coding agent integrating Rungent.
 
 1. Define one `Agent` for one product assistant. Do not introduce skills or routing unless the

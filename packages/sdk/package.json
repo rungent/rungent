@@ -1,6 +1,6 @@
 {
   "name": "@rungent/sdk",
-  "version": "0.3.8",
+  "version": "0.4.0",
   "description": "Headless TypeScript SDK for Rungent sessions, runs, interactions, and ACS",
   "type": "module",
   "license": "Apache-2.0",
@@ -10,7 +10,9 @@
     "url": "https://acahti.saidc.ai/saidc/rungent.git",
     "directory": "packages/sdk"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

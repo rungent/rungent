@@ -80,18 +80,28 @@ class Agent:
     def tool_map(self) -> dict[str, Tool]:
         return {item.name: item for item in self.tools}
 
-    def tool_schemas(self, *, interaction_response_available: bool = False) -> list[dict[str, Any]]:
+    def tool_schemas(
+        self,
+        *,
+        interaction_response_available: bool = False,
+        include: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
         from .tools import REPORT_PROGRESS_SCHEMA, REQUEST_INPUT_SCHEMA
 
-        return [
-            REPORT_PROGRESS_SCHEMA,
-            REQUEST_INPUT_SCHEMA,
-            *(
-                item.schema()
-                for item in self.tools
-                if interaction_response_available or not item.requires_interaction_response
-            ),
+        business = [
+            item.schema()
+            for item in self.tools
+            if (interaction_response_available or not item.requires_interaction_response)
+            and (include is None or item.name in include)
         ]
+        return [REPORT_PROGRESS_SCHEMA, REQUEST_INPUT_SCHEMA, *business]
+
+    def tools_by_domain(self) -> dict[str, list[Tool]]:
+        grouped: dict[str, list[Tool]] = {}
+        for item in self.tools:
+            key = item.domain or "general"
+            grouped.setdefault(key, []).append(item)
+        return grouped
 
     def export_skill(self, *, title: str | None = None, extra: str = "") -> str:
         from .skill import export_skill

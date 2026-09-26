@@ -1,5 +1,9 @@
 # Rungent integration guide for coding agents
 
+**Preferred host path (0.4+):** `create_openapi_runtime` + allowlist/OpenAPI HTTP tools + optional
+`SystemOneSettings.from_env()` for per-step shortlisting. Hand-written `@tool` remains available
+for product-specific intents. See `docs/http-tools.mdx` and `docs/systemone.mdx`.
+
 This is the canonical short context for an AI coding agent integrating Rungent.
 
 1. Define one `Agent` for one product assistant. Do not introduce skills or routing unless the
@@ -100,3 +104,16 @@ This is the canonical short context for an AI coding agent integrating Rungent.
 21. Applications with an obvious deterministic entry path may declare `Agent.run_initializer`.
     It returns at most one registered typed `ToolCall` before the first model step; Rungent applies
     the same validation, interaction, deferred, and event rules as it does to model calls.
+
+Business boundary: the host owns catalogs, form merging, validation, configuration snapshots,
+idempotency, and reconciliation. Rungent only validates interaction envelopes, binds approval to
+frozen calls, and resumes persisted tasks. `approval_ready=False` rejects incomplete writes;
+preparation must use a separate tool without resource side effects. Configure `approval_revision`
+for incompatible host releases. Use `external_task_resolver` for read-only task polling; a failed
+Run that started an approved write cannot be replayed as a new Run.
+
+Custom stores must implement `list_waiting_external_runs(limit=...)` for deferred recovery.
+`claim_run(..., expected_status=..., expected_event_seq=...)` must atomically compare both
+status and event sequence before acquiring the lease. Interaction responses use this
+compare-and-set boundary so an old answer cannot consume a newer form or approval.
+Business configuration, validation and operation state remain host-owned.

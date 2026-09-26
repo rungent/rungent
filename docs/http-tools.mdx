@@ -1,0 +1,28 @@
+# HTTP tools from OpenAPI / allowlist
+
+Hosts that want “same APIs as the console” should not hand-write `@tool` wrappers.
+Build tools from an allowlist (or OpenAPI) and let System One shortlist each step.
+
+```python
+from rungent import HttpToolSettings, create_openapi_runtime, load_allowlist_file
+
+runtime = create_openapi_runtime(
+    name="aidy",
+    instructions="...",
+    model=model,
+    store=store,
+    operations=load_allowlist_file("allowlist.json"),
+    http=HttpToolSettings(base_url=internal_gateway_url),
+    systemone=SystemOneSettings.from_env(),
+)
+```
+
+## Defaults
+
+| Method | approval | effect |
+| --- | --- | --- |
+| GET / HEAD | never | read |
+| others | always | write (or `effect` override) |
+
+Execution uses the caller's `Authorization` from `ToolContext.deps` and redacts
+secrets (and optional IPs). Structured `missing` / `issues` on 400/422 become forms.

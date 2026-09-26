@@ -1,0 +1,31 @@
+# System One (Jev-compatible)
+
+Rungent can shortlist tools each model step with a System One decision endpoint
+(TypeSafe Jev wire protocol; production typically uses in-cluster **Laya**).
+
+## Role
+
+- **Does:** pick domain / whether a tool is needed / which operation fits.
+- **Does not:** fill arguments, write prose, replace `approval="always"`, or enforce RBAC.
+
+## Configure
+
+```python
+from rungent import SystemOneSettings, create_openapi_runtime
+
+runtime = create_openapi_runtime(
+    ...,
+    systemone=SystemOneSettings.from_env(),  # SYSTEMONE_BASE_URL required
+)
+```
+
+Env: `SYSTEMONE_BASE_URL`, optional `SYSTEMONE_MODEL`, `SYSTEMONE_TIMEOUT_SECONDS`,
+`SYSTEMONE_API_KEY`, thresholds `SYSTEMONE_NEEDS_TOOL_THRESHOLD`,
+`SYSTEMONE_CONFIDENCE_THRESHOLD`, `SYSTEMONE_MAX_TOOLS`.
+
+When unset or the call fails, Rungent **degrades to the full allowlist** and logs.
+
+## Security
+
+Pass structured `state` fields (turn, recent tools, focus). Do not concatenate
+untrusted tool output into question instructions. Keep permissions in code.

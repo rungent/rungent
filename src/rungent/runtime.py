@@ -132,6 +132,7 @@ class Runtime:
         event_listener: RuntimeEventListener | None = None,
         context_budget_tokens: int = DEFAULT_CONTEXT_BUDGET_TOKENS,
         error_catalog: ErrorCatalog | None = None,
+        systemone: "SystemOneSettings | SystemOneClient | None" = None,
     ) -> None:
         if not agents:
             raise ValueError("Runtime needs at least one agent")
@@ -172,6 +173,16 @@ class Runtime:
         self._worker_task: asyncio.Task[None] | None = None
         self._worker_id = new_id("worker")
         self._lease_seconds = 30.0
+        from .systemone import SystemOneClient, SystemOneSettings
+
+        if systemone is None:
+            self.systemone: SystemOneClient | None = None
+        elif isinstance(systemone, SystemOneClient):
+            self.systemone = systemone
+        elif isinstance(systemone, SystemOneSettings):
+            self.systemone = SystemOneClient(systemone)
+        else:
+            raise TypeError("systemone must be SystemOneSettings, SystemOneClient, or None")
 
     def _public_error(self, code: str, *, fallback: str | None = None) -> str:
         return self.error_catalog.get(code) or fallback or self.error_catalog["agent_failed"]
@@ -252,6 +263,13 @@ class Runtime:
         tool_schemas = agent.tool_schemas(
             interaction_response_available=ctx.interaction_response is not None
         )
+        if self.systemone is not None:
+            include = await self._systemone_include(agent, ctx, conversation)
+            if include is not None:
+                tool_schemas = agent.tool_schemas(
+                    interaction_response_available=ctx.interaction_response is not None,
+                    include=include,
+                )
         conversation = self._compact_conversation(
             prefix=prefix,
             conversation=conversation,
@@ -271,6 +289,35 @@ class Runtime:
                 tool_schemas=tool_schemas,
                 budget=self.context_budget_tokens,
             ),
+        )
+
+    async def _systemone_include(
+        self,
+        agent: Agent,
+        ctx: ToolContext,
+        conversation: list[dict[str, Any]],
+    ) -> set[str] | None:
+        assert self.systemone is not None
+        from .systemone import shortlist_tools
+
+        recent: list[str] = []
+        for message in conversation:
+            if message.get("role") == "assistant":
+                for call in message.get("tool_calls") or []:
+                    name = (call.get("function") or {}).get("name")
+                    if name:
+                        recent.append(str(name))
+        focus = ""
+        resource = ctx.resource if isinstance(ctx.resource, dict) else {}
+        raw_focus = resource.get("focus")
+        if isinstance(raw_focus, dict):
+            focus = str(raw_focus.get("primary_id") or raw_focus.get("ordered_ids") or "")
+        return await shortlist_tools(
+            self.systemone,
+            tools=list(agent.tools),
+            user_input=ctx.current_input or "",
+            recent_tool_names=recent,
+            focus_summary=focus,
         )
 
     def _compact_conversation(
