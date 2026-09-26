@@ -14,17 +14,22 @@ flowchart LR
   UI["Product UI"] --> SDK["@rungent/sdk"]
   SDK --> HTTP["FastAPI adapter"]
   HTTP --> Runtime["Rungent Runtime"]
-  Runtime --> Model["Model adapter"]
-  Runtime --> Tools["Typed application tools"]
+  Runtime --> S1["System One shortlist"]
+  S1 --> Model["Model adapter"]
+  Runtime --> Tools["HTTP allowlist / typed @tool"]
   Runtime --> Store["Memory or SQLAlchemy Store"]
-  Tools --> Domain["Application services"]
+  Tools --> API["Same product HTTP APIs"]
   Ext["External agent"] --> MCP["MCP adapter"]
   MCP --> Tools
 ```
 
-This boundary gives Roasea direct, typed access to its existing services without a sidecar network
-hop or duplicated authorization model. A sidecar can be added later as another transport only when
-multiple processes or languages genuinely need the same runtime.
+The preferred host path is `create_openapi_runtime`: allowlisted Console (or product) HTTP
+operations become tools, System One shortlists 3–8 operations per step, mutating calls take
+`approval="always"`, and the caller's Bearer loops back to the same `/api/*` surface. Hand-written
+`@tool` remains available for product-specific glue.
+
+This boundary gives applications direct, typed access to existing services without a sidecar
+network hop or duplicated authorization model.
 
 ## Standardized lifecycle
 

@@ -3,6 +3,28 @@ title: Python API
 description: Agents, typed tools, model adapters, runtime context, and results.
 ---
 
+## OpenAPI / HTTP preset
+
+```python
+from rungent import SystemOneSettings, create_openapi_runtime
+from rungent.http_tools import HttpToolSettings
+from rungent.presets import load_allowlist_file
+
+runtime = create_openapi_runtime(
+    name="console",
+    instructions="...",
+    model=model,
+    store=store,
+    operations=load_allowlist_file("allowlist.json"),
+    http=HttpToolSettings(base_url=internal_base_url),
+    systemone=SystemOneSettings.from_env(),
+)
+```
+
+`HttpToolSettings` supplies `base_url`, optional `authorization` factory, and `redact`.
+`SystemOneSettings.from_env()` enables Laya/Jev-compatible shortlisting when `SYSTEMONE_BASE_URL`
+is set. See [System One](/docs/systemone) and [HTTP tools](/docs/http-tools).
+
 ## Agent
 
 An `Agent` is an immutable definition containing instructions, tools, optional dynamic context and

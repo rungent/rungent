@@ -5,9 +5,16 @@ description: Compact, normative Rungent context for coding agents.
 
 ## Objective
 
-Embed Rungent into an existing Python application. Define one `Agent`, typed `@tool` functions, a
-`Runtime`, application identity/context factories, and the FastAPI router. Use `@rungent/sdk` in the
-frontend. Never implement another tool loop.
+Embed Rungent into an existing Python application. Prefer **OpenAPI/HTTP allowlist tools +
+System One** via `create_openapi_runtime`. Hand-written `@tool` is optional for host-only glue.
+Mount the FastAPI router; use `@rungent/sdk` in the frontend. Never implement another tool loop.
+
+## Host minimum checklist
+
+1. JWT / product auth → `Identity` (+ Bearer into `deps`)
+2. Allowlist of Console-equivalent HTTP operations
+3. Prompt / instructions
+4. Env: LLM + optional `SYSTEMONE_*` + internal API base URL
 
 ## Canonical imports
 
@@ -19,14 +26,18 @@ from rungent import (
     InteractionRequest,
     Runtime,
     RunActivity,
+    SystemOneSettings,
     ToolContext,
     ToolContinuation,
     ToolResult,
+    create_openapi_runtime,
     tool,
 )
 from rungent.fastapi import create_router
+from rungent.http_tools import HttpToolSettings
 from rungent.mcp import create_mcp_asgi
 from rungent.llm import OpenAICompatibleModel
+from rungent.presets import load_allowlist_file
 from rungent.sqlalchemy import RungentBase, SQLAlchemyStore
 from rungent.testing import BaselineCase, BaselineSuite, ScriptedModel, run_baseline
 ```
