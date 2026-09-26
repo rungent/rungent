@@ -252,12 +252,11 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
             if name in arguments and arguments[name] is not None
         }
         url_path = _format_path(operation.path, path_values)
-        query = {
+        reserved = set(path_values) | {"body", "note"}
+        top_level = {
             key: value
             for key, value in arguments.items()
-            if key not in path_values
-            and key not in {"body", "note"}
-            and value is not None
+            if key not in reserved and value is not None
         }
         body = arguments.get("body")
         if isinstance(body, str):
@@ -265,6 +264,15 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
                 body = json.loads(body)
             except json.JSONDecodeError:
                 pass
+        # Mutating calls: fold top-level tool args into the JSON body instead of query.
+        if operation.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            if body is None and top_level:
+                body = dict(top_level)
+                top_level = {}
+            elif isinstance(body, dict) and top_level:
+                body = {**top_level, **body}
+                top_level = {}
+        query = top_level
         if (
             operation.wrap_body
             and isinstance(body, dict)
