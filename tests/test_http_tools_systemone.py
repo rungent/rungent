@@ -130,6 +130,44 @@ async def test_http_get_tool_executes():
     await async_client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_http_post_wraps_flat_json_string_body():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "d1", "status": "draft"})
+
+    transport = httpx.MockTransport(handler)
+    async_client = httpx.AsyncClient(transport=transport)
+    settings = HttpToolSettings(base_url="http://gw.test", client=async_client)
+    tools = tools_from_operations(
+        [
+            HttpOperation(
+                name="create_vm_draft",
+                method="POST",
+                path="/api/vm/create-drafts",
+                summary="Create draft",
+                domain="vm",
+                approval="never",
+                wrap_body="inputs",
+            )
+        ],
+        settings,
+    )
+    ctx = ToolContext(
+        identity=Identity(subject_id="u1"),
+        session_id="s1",
+        run_id="r1",
+        deps={"Authorization": "Bearer t"},
+    )
+    result = await tools[0](ctx, body=json.dumps({"name": "n1", "zone_id": "z1"}))
+    assert result.data["ok"] is True
+    assert captured["body"] == {"inputs": {"name": "n1", "zone_id": "z1"}}
+    await async_client.aclose()
+
+
 def test_create_openapi_agent_builds_tools():
     agent = create_openapi_agent(
         name="aidy",

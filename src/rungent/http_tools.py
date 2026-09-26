@@ -67,6 +67,8 @@ class HttpOperation:
     confirmation: str | None = None
     timeout_seconds: float = 120.0
     strip_ips: bool = False
+    # When set (e.g. "inputs"), wrap a flat JSON object as {inputs: ...} if the key is absent.
+    wrap_body: str | None = None
 
     def __post_init__(self) -> None:
         method = self.method.upper()
@@ -258,6 +260,18 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
             and value is not None
         }
         body = arguments.get("body")
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except json.JSONDecodeError:
+                pass
+        if (
+            operation.wrap_body
+            and isinstance(body, dict)
+            and operation.wrap_body not in body
+            and body
+        ):
+            body = {operation.wrap_body: body}
         headers: dict[str, str] = {"Accept": "application/json"}
         auth = await _resolve_auth(settings, ctx)
         if auth:
@@ -269,12 +283,16 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
             client = httpx.AsyncClient(timeout=operation.timeout_seconds)
             owns = True
         try:
+            json_body = body if isinstance(body, (dict, list)) else None
+            content = None if json_body is not None else (body if isinstance(body, str) else None)
+            if json_body is not None:
+                headers["Content-Type"] = "application/json"
             response = await client.request(
                 operation.method,
                 f"{settings.base_url}{url_path}",
                 params=query or None,
-                json=body if isinstance(body, (dict, list)) else None,
-                content=body if isinstance(body, str) else None,
+                json=json_body,
+                content=content,
                 headers=headers,
             )
         finally:
