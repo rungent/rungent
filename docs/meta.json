@@ -5,6 +5,8 @@
     "architecture",
     "getting-started",
     "python-api",
+    "http-tools",
+    "systemone",
     "fastapi",
     "mcp",
     "external-agents",
