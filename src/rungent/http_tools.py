@@ -203,6 +203,17 @@ def _default_approval(method: str) -> ApprovalPolicy:
     return ApprovalPolicy.NEVER if method in {"GET", "HEAD"} else ApprovalPolicy.ALWAYS
 
 
+def _create_draft_resource_path(url_path: str) -> str | None:
+    """Parent draft GET path for create-drafts .../prepare|commit."""
+    for suffix in ("/prepare", "/commit"):
+        if not url_path.endswith(suffix):
+            continue
+        parent = url_path[: -len(suffix)]
+        if "/create-drafts/" in parent:
+            return parent
+    return None
+
+
 def _confirmation_for(operation: HttpOperation) -> str | None:
     if _default_approval(operation.method) is ApprovalPolicy.NEVER and not operation.approval:
         return None
@@ -272,6 +283,8 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
             elif isinstance(body, dict) and top_level:
                 body = {**top_level, **body}
                 top_level = {}
+            elif body is None and operation.method in {"POST", "PUT", "PATCH"}:
+                body = {}
         query = top_level
         if (
             operation.wrap_body
@@ -291,6 +304,30 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
             client = httpx.AsyncClient(timeout=operation.timeout_seconds)
             owns = True
         try:
+            draft_path = _create_draft_resource_path(url_path)
+            if (
+                draft_path
+                and operation.method in {"POST", "PUT", "PATCH"}
+                and (not isinstance(body, dict) or body.get("revision") is None)
+            ):
+                draft_response = await client.request(
+                    "GET",
+                    f"{settings.base_url}{draft_path}",
+                    headers=headers,
+                )
+                try:
+                    draft_payload: Any = draft_response.json()
+                except Exception:
+                    draft_payload = None
+                if (
+                    200 <= draft_response.status_code < 300
+                    and isinstance(draft_payload, dict)
+                    and draft_payload.get("revision") is not None
+                ):
+                    body = {
+                        **(body if isinstance(body, dict) else {}),
+                        "revision": draft_payload["revision"],
+                    }
             json_body = body if isinstance(body, (dict, list)) else None
             content = None if json_body is not None else (body if isinstance(body, str) else None)
             if json_body is not None:

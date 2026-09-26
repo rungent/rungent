@@ -31,8 +31,12 @@ class SystemOneSettings:
         base_url = (os.environ.get(f"{prefix}BASE_URL") or "").strip()
         if not base_url:
             return None
+        normalized = base_url.rstrip("/")
+        # OpenAI-style ".../v1" bases are common; client posts "/v1/systemone".
+        if normalized.endswith("/v1"):
+            normalized = normalized[: -len("/v1")].rstrip("/")
         return cls(
-            base_url=base_url.rstrip("/"),
+            base_url=normalized,
             model=(os.environ.get(f"{prefix}MODEL") or "multilingual").strip(),
             timeout_seconds=float(os.environ.get(f"{prefix}TIMEOUT_SECONDS") or "5"),
             api_key=(os.environ.get(f"{prefix}API_KEY") or "").strip() or None,
@@ -130,13 +134,20 @@ async def shortlist_tools(
     needs = answers.get("needs_tool") or {}
     noul = float(needs.get("noul") if isinstance(needs, dict) else 0)
     if noul < client.settings.needs_tool_threshold:
-        return set()
+        # Prefer full catalog over an empty tool set (model would have zero ops).
+        logger.info("System One needs_tool=%.3f below threshold; using full catalog", noul)
+        return None
 
     domain_answer = answers.get("domain") or {}
     domain = str(domain_answer.get("choice") or "")
     confidence = float(domain_answer.get("confidence") or 0)
     if confidence < client.settings.confidence_threshold or domain not in by_domain:
-        return set()
+        logger.info(
+            "System One domain=%r confidence=%.3f; using full catalog",
+            domain,
+            confidence,
+        )
+        return None
 
     candidates = by_domain[domain]
     tool_criteria = {item.name: (item.description or item.title)[:200] for item in candidates}

@@ -23,7 +23,8 @@ Env: `SYSTEMONE_BASE_URL`, optional `SYSTEMONE_MODEL`, `SYSTEMONE_TIMEOUT_SECOND
 `SYSTEMONE_API_KEY`, thresholds `SYSTEMONE_NEEDS_TOOL_THRESHOLD`,
 `SYSTEMONE_CONFIDENCE_THRESHOLD`, `SYSTEMONE_MAX_TOOLS`.
 
-When unset or the call fails, Rungent **degrades to the full allowlist** and logs.
+When unset or the call fails / is low-confidence, Rungent **degrades to the full allowlist**
+(never an empty business-tool set) and logs.
 
 ## Security
 
