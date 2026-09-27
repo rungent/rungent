@@ -32,7 +32,7 @@ questions = {
   tool: choice over the full business catalog (name → description),
   needs_tool / acts_on_resources / prose_suffices: product-neutral Nouls,
 }
-gate = mean(needs_tool, acts_on_resources, 1 - prose_suffices)
+gate = max(needs_tool, acts_on_resources, 1 - prose_suffices)
 ```
 
 | Condition | Mode | `include` (business tools) |

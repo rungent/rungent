@@ -483,6 +483,8 @@ def operations_from_openapi(
             for param in operation.get("parameters") or []:
                 if not isinstance(param, dict):
                     continue
+                if str(param.get("in") or "").lower() in {"header", "cookie"}:
+                    continue
                 param_name = str(param.get("name") or "")
                 if not param_name:
                     continue

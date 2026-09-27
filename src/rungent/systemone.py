@@ -244,9 +244,10 @@ def _noul_value(answers: dict[str, Any], key: str) -> float:
 def _gate_noul(answers: dict[str, Any]) -> float:
     needs = _noul_value(answers, "needs_tool")
     acts = _noul_value(answers, "acts_on_resources")
-    prose = _noul_value(answers, "prose_suffices")
-    # prose_suffices is inverted: high prose → lower tool need.
-    return (needs + acts + (1.0 - prose)) / 3.0
+    not_prose = 1.0 - _noul_value(answers, "prose_suffices")
+    # Strongest affirmative signal: one well-calibrated Noul can open the gate.
+    # Mean of all three under-triggers on Laya for list/create Chinese turns.
+    return max(needs, acts, not_prose)
 
 
 async def shortlist_tools(
