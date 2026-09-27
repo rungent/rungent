@@ -295,7 +295,11 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
             and operation.wrap_body not in body
             and body
         ):
-            body = {operation.wrap_body: body}
+            # Keep protocol fields (e.g. draft revision) outside the wrapped payload.
+            keep = {"revision", "vg_ssh_keys"}
+            outer = {key: body[key] for key in keep if key in body}
+            inner = {key: value for key, value in body.items() if key not in keep}
+            body = {**outer, operation.wrap_body: inner} if inner else outer
         headers: dict[str, str] = {"Accept": "application/json"}
         auth = await _resolve_auth(settings, ctx)
         if auth:

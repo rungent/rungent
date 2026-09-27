@@ -173,9 +173,9 @@ def _expand_act_include(
     ordered: list[str] = [winner]
 
     family = _family_expand(tools, [winner])
-    for name in sorted(family):
-        if name not in ordered:
-            ordered.append(name)
+    for tool in tools:
+        if tool.name in family and tool.name not in ordered:
+            ordered.append(tool.name)
 
     if winner_tool is None:
         return _cap_names(ordered, limit=max_tools)
@@ -217,7 +217,11 @@ def _sticky_include(
         seeds.append(winner)
     family = _family_expand(tools, seeds)
     if family:
-        return _cap_names(sorted(family), limit=max_tools)
+        ordered = [name for name in seeds if name in family]
+        for tool in tools:
+            if tool.name in family and tool.name not in ordered:
+                ordered.append(tool.name)
+        return _cap_names(ordered, limit=max_tools)
 
     if winner:
         by_name = {tool.name: tool for tool in tools}
