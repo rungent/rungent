@@ -309,6 +309,56 @@ async def test_http_prepare_fetches_revision_when_missing():
 
 
 @pytest.mark.asyncio
+async def test_http_patch_wrap_body_fetches_revision():
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/api/vm/create-drafts/d1"
+            return httpx.Response(200, json={"id": "d1", "revision": 3, "status": "draft"})
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "d1", "revision": 4, "status": "draft"})
+
+    transport = httpx.MockTransport(handler)
+    async_client = httpx.AsyncClient(transport=transport)
+    settings = HttpToolSettings(base_url="http://gw.test", client=async_client)
+    tools = tools_from_operations(
+        [
+            HttpOperation(
+                name="patch_vm_draft",
+                method="PATCH",
+                path="/api/vm/create-drafts/{draft_id}",
+                summary="Patch draft",
+                domain="vm",
+                approval="never",
+                wrap_body="inputs",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {"type": "string"},
+                        "zone_id": {"type": "string"},
+                        "body": {"type": "object"},
+                    },
+                },
+            )
+        ],
+        settings,
+    )
+    ctx = ToolContext(
+        identity=Identity(subject_id="u1"),
+        session_id="s1",
+        run_id="r1",
+        deps={"Authorization": "Bearer t"},
+    )
+    result = await tools[0](ctx, draft_id="d1", zone_id="z1")
+    assert result.data["ok"] is True
+    assert captured["path"] == "/api/vm/create-drafts/d1"
+    assert captured["body"] == {"revision": 3, "inputs": {"zone_id": "z1"}}
+    await async_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_http_get_tool_executes():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

@@ -207,13 +207,19 @@ def _default_approval(method: str) -> ApprovalPolicy:
 
 
 def _create_draft_resource_path(url_path: str) -> str | None:
-    """Parent draft GET path for create-drafts .../prepare|commit."""
+    """Draft GET path for create-drafts mutate (PATCH / prepare / commit)."""
+    path = url_path.rstrip("/")
     for suffix in ("/prepare", "/commit"):
-        if not url_path.endswith(suffix):
+        if not path.endswith(suffix):
             continue
-        parent = url_path[: -len(suffix)]
+        parent = path[: -len(suffix)]
         if "/create-drafts/" in parent:
             return parent
+    # PATCH/PUT on .../create-drafts/{draft_id}
+    if "/create-drafts/" in path:
+        after = path.split("/create-drafts/", 1)[1]
+        if after and "/" not in after:
+            return path
     return None
 
 
