@@ -2,7 +2,8 @@
 
 import logging
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -12,6 +13,13 @@ from .tools import Tool
 logger = logging.getLogger(__name__)
 
 _BUILTIN = frozenset({"request_input", "report_progress"})
+_DRAFT_NAME = re.compile(
+    r"^(?P<action>create|prepare|commit|patch|get)_(?P<resource>.+)_draft$"
+)
+
+MODE_CHAT = "chat"
+MODE_ACT = "act"
+MODE_STICKY = "sticky"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +52,17 @@ class SystemOneSettings:
             confidence_threshold=float(os.environ.get(f"{prefix}CONFIDENCE_THRESHOLD") or "0.6"),
             max_tools=int(os.environ.get(f"{prefix}MAX_TOOLS") or "8"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ShortlistResult:
+    """Harness shortlist for one model step. Never means 'full catalog'."""
+
+    mode: str
+    include: set[str] = field(default_factory=set)
+    noul: float | None = None
+    choice: str | None = None
+    confidence: float | None = None
 
 
 class SystemOneClient:
@@ -85,6 +104,105 @@ class SystemOneClient:
         return answers
 
 
+def _draft_resource(name: str) -> str | None:
+    match = _DRAFT_NAME.match(name)
+    return match.group("resource") if match else None
+
+
+def _draft_family(tools: list[Tool], seeds: list[str] | set[str]) -> set[str]:
+    resources = {res for name in seeds if (res := _draft_resource(name))}
+    if not resources:
+        return set()
+    return {
+        tool.name
+        for tool in tools
+        if (res := _draft_resource(tool.name)) and res in resources
+    }
+
+
+def _cap_names(names: list[str], *, limit: int) -> set[str]:
+    if limit <= 0:
+        return set()
+    return set(names[:limit])
+
+
+def _domain_cap(tools: list[Tool], *, domain: str, limit: int) -> set[str]:
+    ordered = [tool.name for tool in tools if (tool.domain or "general") == domain]
+    return _cap_names(ordered, limit=limit)
+
+
+def _expand_act_include(
+    tools: list[Tool],
+    *,
+    winner: str,
+    max_tools: int,
+) -> set[str]:
+    by_name = {tool.name: tool for tool in tools}
+    if winner not in by_name:
+        # Unknown winner: keep draft family from name alone if parseable, else empty act set.
+        family = _draft_family(tools, [winner])
+        return _cap_names([winner, *sorted(family)], limit=max_tools) if family else set()
+
+    family = _draft_family(tools, [winner])
+    ordered: list[str] = [winner]
+    for name in sorted(family):
+        if name != winner and name not in ordered:
+            ordered.append(name)
+
+    winner_tokens = set(winner.split("_"))
+    domain = by_name[winner].domain or "general"
+    siblings = [
+        tool
+        for tool in tools
+        if tool.name not in ordered and (tool.domain or "general") == domain
+    ]
+
+    def _affinity(tool: Tool) -> tuple[int, int]:
+        shared = len(winner_tokens & set(tool.name.split("_")))
+        return (-shared, siblings.index(tool))
+
+    for tool in sorted(siblings, key=_affinity):
+        if len(ordered) >= max_tools:
+            break
+        ordered.append(tool.name)
+    return _cap_names(ordered, limit=max_tools)
+
+
+def _sticky_include(
+    tools: list[Tool],
+    *,
+    previous: set[str] | None,
+    recent_tool_names: list[str],
+    winner: str | None,
+    max_tools: int,
+) -> set[str]:
+    if previous:
+        alive = {name for name in previous if any(tool.name == name for tool in tools)}
+        if alive:
+            return _cap_names(sorted(alive), limit=max_tools)
+
+    seeds = list(recent_tool_names)
+    if winner:
+        seeds.append(winner)
+    family = _draft_family(tools, seeds)
+    if family:
+        return _cap_names(sorted(family), limit=max_tools)
+
+    if winner:
+        by_name = {tool.name: tool for tool in tools}
+        tool = by_name.get(winner)
+        if tool is not None:
+            return _domain_cap(tools, domain=tool.domain or "general", limit=max_tools)
+
+    for name in reversed(recent_tool_names):
+        by_name = {tool.name: tool for tool in tools}
+        tool = by_name.get(name)
+        if tool is not None:
+            return _domain_cap(tools, domain=tool.domain or "general", limit=max_tools)
+
+    return _cap_names([tool.name for tool in tools], limit=max_tools)
+
+
 async def shortlist_tools(
     client: SystemOneClient,
     *,
@@ -92,102 +210,124 @@ async def shortlist_tools(
     user_input: str,
     recent_tool_names: list[str],
     focus_summary: str = "",
-) -> set[str] | None:
-    """Return business tool names to expose this step, or None to keep the full catalog.
+    pending: str = "",
+    previous_include: set[str] | None = None,
+) -> ShortlistResult:
+    """Return a harness shortlist for this model step.
 
-    On transport/API failure returns None (degrade to full allowlist).
+    Aligns with the Jev agent-harness contract:
+    - low ``needs_tool`` noul → chat (no business tools)
+    - high noul + confident choice → act (winner + draft family)
+    - failure / low confidence → sticky (previous or capped family), never full catalog
     """
     if not tools:
-        return set()
-    by_domain: dict[str, list[Tool]] = {}
-    for tool in tools:
-        by_domain.setdefault(tool.domain or "general", []).append(tool)
-    domain_criteria = {
-        domain: f"{len(items)} operations: "
-        + ", ".join(item.name for item in items[:12])
-        for domain, items in by_domain.items()
+        return ShortlistResult(mode=MODE_CHAT, include=set(), noul=None)
+
+    tool_criteria = {
+        item.name: (item.description or item.title or item.name)[:200] for item in tools
     }
     state = {
         "turn": user_input[:2000],
         "recent_tools": recent_tool_names[-6:],
         "focus": focus_summary[:500],
+        "pending": pending[:500],
     }
     questions: dict[str, Any] = {
-        "domain": {
+        "tool": {
             "type": "choice",
-            "instructions": "Which product domain best serves `turn`?",
-            "criteria": domain_criteria,
+            "instructions": "哪个 API 操作最能完成 `turn`？",
+            "criteria": tool_criteria,
         },
         "needs_tool": {
             "type": "noul",
-            "instructions": (
-                "Does `turn` require calling a console API tool rather than a direct answer?"
-            ),
+            "instructions": "`turn` 是否需要调用控制台 API 工具，而不是直接用自然语言回答？",
+            "criteria": {
+                "true": "用户要求列出、创建、修改、开关机或查询控制台资源，需要新的 API 调用",
+                "false": "用户寒暄、询问概念解释，或仅凭已有上下文即可回答",
+            },
         },
     }
     try:
         answers = await client.evaluate(state=state, questions=questions)
     except Exception:
-        logger.exception("System One shortlist failed; using full tool catalog")
-        return None
+        include = _sticky_include(
+            tools,
+            previous=previous_include,
+            recent_tool_names=recent_tool_names,
+            winner=None,
+            max_tools=client.settings.max_tools,
+        )
+        logger.exception(
+            "System One shortlist failed; mode=%s include_size=%d",
+            MODE_STICKY,
+            len(include),
+        )
+        return ShortlistResult(mode=MODE_STICKY, include=include)
 
     needs = answers.get("needs_tool") or {}
     noul = float(needs.get("noul") if isinstance(needs, dict) else 0)
-    if noul < client.settings.needs_tool_threshold:
-        # Prefer full catalog over an empty tool set (model would have zero ops).
-        logger.info("System One needs_tool=%.3f below threshold; using full catalog", noul)
-        return None
+    pick = answers.get("tool") or {}
+    winner = str(pick.get("choice") or "") if isinstance(pick, dict) else ""
+    confidence = float(pick.get("confidence") or 0) if isinstance(pick, dict) else 0.0
 
-    domain_answer = answers.get("domain") or {}
-    domain = str(domain_answer.get("choice") or "")
-    confidence = float(domain_answer.get("confidence") or 0)
-    if confidence < client.settings.confidence_threshold or domain not in by_domain:
+    if noul < client.settings.needs_tool_threshold:
         logger.info(
-            "System One domain=%r confidence=%.3f; using full catalog",
-            domain,
+            "System One mode=%s noul=%.3f choice=%r confidence=%.3f include_size=0",
+            MODE_CHAT,
+            noul,
+            winner,
             confidence,
         )
-        return None
-
-    candidates = by_domain[domain]
-    tool_criteria = {item.name: (item.description or item.title)[:200] for item in candidates}
-    try:
-        tool_answers = await client.evaluate(
-            state=state,
-            questions={
-                "tool": {
-                    "type": "choice",
-                    "instructions": "Which API operation best serves `turn`?",
-                    "criteria": tool_criteria,
-                }
-            },
+        return ShortlistResult(
+            mode=MODE_CHAT,
+            include=set(),
+            noul=noul,
+            choice=winner or None,
+            confidence=confidence,
         )
-    except Exception:
-        logger.exception("System One tool pick failed; exposing domain tools")
-        return {item.name for item in candidates[: client.settings.max_tools]}
 
-    pick = tool_answers.get("tool") or {}
-    winner = str(pick.get("choice") or "")
-    pick_confidence = float(pick.get("confidence") or 0)
-    if pick_confidence < client.settings.confidence_threshold or not winner:
-        return {item.name for item in candidates[: client.settings.max_tools]}
+    if confidence >= client.settings.confidence_threshold and winner:
+        include = _expand_act_include(
+            tools, winner=winner, max_tools=client.settings.max_tools
+        )
+        logger.info(
+            "System One mode=%s noul=%.3f choice=%r confidence=%.3f include_size=%d",
+            MODE_ACT,
+            noul,
+            winner,
+            confidence,
+            len(include),
+        )
+        return ShortlistResult(
+            mode=MODE_ACT,
+            include=include,
+            noul=noul,
+            choice=winner,
+            confidence=confidence,
+        )
 
-    winner_tokens = set(winner.split("_"))
-
-    def _affinity(tool: Tool) -> tuple[int, int]:
-        # Prefer same create-draft / power family as the winner before unrelated domain ops.
-        shared = len(winner_tokens & set(tool.name.split("_")))
-        return (-shared, candidates.index(tool))
-
-    ordered = [winner]
-    for item in sorted(
-        (tool for tool in candidates if tool.name != winner),
-        key=_affinity,
-    ):
-        if len(ordered) >= client.settings.max_tools:
-            break
-        ordered.append(item.name)
-    return set(ordered)
+    include = _sticky_include(
+        tools,
+        previous=previous_include,
+        recent_tool_names=recent_tool_names,
+        winner=winner or None,
+        max_tools=client.settings.max_tools,
+    )
+    logger.info(
+        "System One mode=%s noul=%.3f choice=%r confidence=%.3f include_size=%d",
+        MODE_STICKY,
+        noul,
+        winner,
+        confidence,
+        len(include),
+    )
+    return ShortlistResult(
+        mode=MODE_STICKY,
+        include=include,
+        noul=noul,
+        choice=winner or None,
+        confidence=confidence,
+    )
 
 
 def is_builtin_tool_name(name: str) -> bool:

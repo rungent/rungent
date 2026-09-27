@@ -1,7 +1,8 @@
 # HTTP tools from OpenAPI / allowlist
 
 Hosts that want “same APIs as the console” should not hand-write `@tool` wrappers.
-Build tools from an allowlist (or OpenAPI) and let System One shortlist each step.
+Build tools from an allowlist (or OpenAPI) and let System One shortlist each step
+(`chat` / `act` / `sticky` — see [System One](/docs/systemone)).
 
 ```python
 from rungent import HttpToolSettings, create_openapi_runtime, load_allowlist_file

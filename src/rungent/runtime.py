@@ -183,6 +183,7 @@ class Runtime:
             self.systemone = SystemOneClient(systemone)
         else:
             raise TypeError("systemone must be SystemOneSettings, SystemOneClient, or None")
+        self._systemone_prev_include: dict[str, set[str]] = {}
 
     def _public_error(self, code: str, *, fallback: str | None = None) -> str:
         return self.error_catalog.get(code) or fallback or self.error_catalog["agent_failed"]
@@ -260,16 +261,16 @@ class Runtime:
         ]
         if context_text:
             prefix.append({"role": "system", "content": context_text})
-        tool_schemas = agent.tool_schemas(
-            interaction_response_available=ctx.interaction_response is not None
-        )
         if self.systemone is not None:
-            include = await self._systemone_include(agent, ctx, conversation)
-            if include is not None:
-                tool_schemas = agent.tool_schemas(
-                    interaction_response_available=ctx.interaction_response is not None,
-                    include=include,
-                )
+            shortlist = await self._systemone_include(agent, ctx, conversation)
+            tool_schemas = agent.tool_schemas(
+                interaction_response_available=ctx.interaction_response is not None,
+                include=shortlist.include,
+            )
+        else:
+            tool_schemas = agent.tool_schemas(
+                interaction_response_available=ctx.interaction_response is not None
+            )
         conversation = self._compact_conversation(
             prefix=prefix,
             conversation=conversation,
@@ -291,14 +292,45 @@ class Runtime:
             ),
         )
 
+    @staticmethod
+    def _latest_user_turn(
+        conversation: list[dict[str, Any]], *, fallback: str
+    ) -> str:
+        for message in reversed(conversation):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, str) and item.strip():
+                        parts.append(item.strip())
+                    elif isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                if parts:
+                    return "\n".join(parts)
+        return fallback
+
+    @staticmethod
+    def _pending_summary(ctx: ToolContext) -> str:
+        interaction = ctx.interaction_response
+        if interaction is None:
+            return ""
+        kind = getattr(interaction, "kind", None) or type(interaction).__name__
+        return str(kind)[:200]
+
     async def _systemone_include(
         self,
         agent: Agent,
         ctx: ToolContext,
         conversation: list[dict[str, Any]],
-    ) -> set[str] | None:
+    ):
         assert self.systemone is not None
-        from .systemone import shortlist_tools
+        from .systemone import ShortlistResult, shortlist_tools
 
         recent: list[str] = []
         for message in conversation:
@@ -312,13 +344,22 @@ class Runtime:
         raw_focus = resource.get("focus")
         if isinstance(raw_focus, dict):
             focus = str(raw_focus.get("primary_id") or raw_focus.get("ordered_ids") or "")
-        return await shortlist_tools(
+        sticky_key = ctx.run_id or ctx.session_id
+        previous = self._systemone_prev_include.get(sticky_key)
+        result: ShortlistResult = await shortlist_tools(
             self.systemone,
             tools=list(agent.tools),
-            user_input=ctx.current_input or "",
+            user_input=self._latest_user_turn(
+                conversation, fallback=ctx.current_input or ""
+            ),
             recent_tool_names=recent,
             focus_summary=focus,
+            pending=self._pending_summary(ctx),
+            previous_include=previous,
         )
+        if result.mode != "chat":
+            self._systemone_prev_include[sticky_key] = set(result.include)
+        return result
 
     def _compact_conversation(
         self,

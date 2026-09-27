@@ -24,7 +24,8 @@ flowchart LR
 ```
 
 The preferred host path is `create_openapi_runtime`: allowlisted Console (or product) HTTP
-operations become tools, System One shortlists 3–8 operations per step, mutating calls take
+operations become tools, System One picks a **chat / act / sticky** shortlist each step (never
+fail-open to the full catalog; see [System One](/docs/systemone)), mutating calls take
 `approval="always"`, and the caller's Bearer loops back to the same `/api/*` surface. Hand-written
 `@tool` remains available for product-specific glue.
 

@@ -9,7 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from rungent import ToolContext, create_openapi_agent
 from rungent.http_tools import HttpOperation, HttpToolSettings, tools_from_operations
 from rungent.state import Identity
-from rungent.systemone import SystemOneClient, SystemOneSettings, shortlist_tools
+from rungent.systemone import (
+    MODE_ACT,
+    MODE_CHAT,
+    MODE_STICKY,
+    SystemOneClient,
+    SystemOneSettings,
+    shortlist_tools,
+)
 from rungent.tools import ApprovalPolicy, Tool, ToolEffect
 
 
@@ -41,105 +48,79 @@ def _tool(name: str, domain: str) -> Tool:
     )
 
 
-@pytest.mark.asyncio
-async def test_shortlist_picks_domain_tools():
-    settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.5)
-    client = SystemOneClient(settings)
-
+def _one_shot_answers(answers: dict[str, Any]):
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        questions = payload["questions"]
-        if "needs_tool" in questions:
-            return httpx.Response(
-                200,
-                json={
-                    "answers": {
-                        "needs_tool": {"type": "noul", "noul": 0.9},
-                        "domain": {
-                            "type": "choice",
-                            "choice": "vm",
-                            "confidence": 0.9,
-                            "probabilities": {"vm": 0.9},
-                        },
-                    }
-                },
-            )
-        return httpx.Response(
-            200,
-            json={
-                "answers": {
+        assert "tool" in payload["questions"]
+        assert "needs_tool" in payload["questions"]
+        assert payload["questions"]["needs_tool"]["type"] == "noul"
+        assert "criteria" in payload["questions"]["needs_tool"]
+        return httpx.Response(200, json={"answers": answers})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_shortlist_act_picks_tool_not_other_domain():
+    settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.5)
+    client = SystemOneClient(settings)
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(
+            _one_shot_answers(
+                {
+                    "needs_tool": {"type": "noul", "noul": 0.9},
                     "tool": {
                         "type": "choice",
                         "choice": "list_vms",
                         "confidence": 0.95,
-                        "probabilities": {"list_vms": 0.95},
-                    }
+                        "probabilities": {"list_vms": 0.95, "list_elastic": 0.05},
+                    },
                 }
-            },
-        )
-
-    transport = httpx.MockTransport(handler)
-    client._client = httpx.AsyncClient(base_url=settings.base_url, transport=transport)
+            )
+        ),
+    )
     client._owns_client = True
 
-    names = await shortlist_tools(
+    result = await shortlist_tools(
         client,
         tools=[_tool("list_vms", "vm"), _tool("list_elastic", "elastic")],
         user_input="列出云服务器",
         recent_tool_names=[],
     )
-    assert names is not None
-    assert "list_vms" in names
-    assert "list_elastic" not in names
+    assert result.mode == MODE_ACT
+    assert "list_vms" in result.include
+    assert "list_elastic" not in result.include
     await client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_shortlist_prefers_name_affinity_within_max_tools():
+async def test_shortlist_act_merges_draft_family_within_max_tools():
     settings = SystemOneSettings(
         base_url="http://systemone.test",
         confidence_threshold=0.5,
         max_tools=4,
     )
     client = SystemOneClient(settings)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        questions = payload["questions"]
-        if "needs_tool" in questions:
-            return httpx.Response(
-                200,
-                json={
-                    "answers": {
-                        "needs_tool": {"type": "noul", "noul": 0.9},
-                        "domain": {
-                            "type": "choice",
-                            "choice": "vm",
-                            "confidence": 0.9,
-                            "probabilities": {"vm": 0.9},
-                        },
-                    }
-                },
-            )
-        return httpx.Response(
-            200,
-            json={
-                "answers": {
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(
+            _one_shot_answers(
+                {
+                    "needs_tool": {"type": "noul", "noul": 0.9},
                     "tool": {
                         "type": "choice",
                         "choice": "create_vm_draft",
                         "confidence": 0.95,
                         "probabilities": {"create_vm_draft": 0.95},
-                    }
+                    },
                 }
-            },
-        )
-
-    transport = httpx.MockTransport(handler)
-    client._client = httpx.AsyncClient(base_url=settings.base_url, transport=transport)
+            )
+        ),
+    )
     client._owns_client = True
 
-    names = await shortlist_tools(
+    result = await shortlist_tools(
         client,
         tools=[
             _tool("list_zones", "vm"),
@@ -148,85 +129,131 @@ async def test_shortlist_prefers_name_affinity_within_max_tools():
             _tool("create_vm_draft", "vm"),
             _tool("prepare_vm_draft", "vm"),
             _tool("commit_vm_draft", "vm"),
+            _tool("patch_vm_draft", "vm"),
         ],
         user_input="创建一台云服务器",
         recent_tool_names=[],
     )
-    assert names is not None
-    assert "create_vm_draft" in names
-    assert "prepare_vm_draft" in names
-    assert "commit_vm_draft" in names
-    assert "list_zones" not in names
+    assert result.mode == MODE_ACT
+    assert "create_vm_draft" in result.include
+    assert "prepare_vm_draft" in result.include
+    assert "commit_vm_draft" in result.include
+    assert "list_zones" not in result.include
+    assert len(result.include) <= 4
     await client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_shortlist_low_confidence_degrades_to_full_catalog():
+async def test_shortlist_low_noul_is_chat_empty_include():
     settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.6)
     client = SystemOneClient(settings)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "answers": {
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(
+            _one_shot_answers(
+                {
                     "needs_tool": {"type": "noul", "noul": 0.2},
-                    "domain": {
+                    "tool": {
                         "type": "choice",
-                        "choice": "vm",
+                        "choice": "list_vms",
                         "confidence": 0.9,
-                        "probabilities": {"vm": 0.9},
+                        "probabilities": {"list_vms": 0.9},
                     },
                 }
-            },
-        )
-
-    transport = httpx.MockTransport(handler)
-    client._client = httpx.AsyncClient(base_url=settings.base_url, transport=transport)
+            )
+        ),
+    )
     client._owns_client = True
 
-    names = await shortlist_tools(
+    result = await shortlist_tools(
         client,
-        tools=[_tool("list_vms", "vm")],
+        tools=[_tool("list_vms", "vm"), _tool("list_elastic", "elastic")],
         user_input="你好",
         recent_tool_names=[],
     )
-    assert names is None
+    assert result.mode == MODE_CHAT
+    assert result.include == set()
     await client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_shortlist_unknown_domain_degrades_to_full_catalog():
-    settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.5)
+async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
+    settings = SystemOneSettings(
+        base_url="http://systemone.test",
+        confidence_threshold=0.6,
+        max_tools=3,
+    )
+    client = SystemOneClient(settings)
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(
+            _one_shot_answers(
+                {
+                    "needs_tool": {"type": "noul", "noul": 0.9},
+                    "tool": {
+                        "type": "choice",
+                        "choice": "create_vm_draft",
+                        "confidence": 0.4,
+                        "probabilities": {"create_vm_draft": 0.4, "list_vms": 0.3},
+                    },
+                }
+            )
+        ),
+    )
+    client._owns_client = True
+
+    catalog = [
+        _tool("list_zones", "vm"),
+        _tool("list_vms", "vm"),
+        _tool("create_vm_draft", "vm"),
+        _tool("prepare_vm_draft", "vm"),
+        _tool("commit_vm_draft", "vm"),
+        _tool("list_elastic", "elastic"),
+    ]
+    result = await shortlist_tools(
+        client,
+        tools=catalog,
+        user_input="创建一台云服务器",
+        recent_tool_names=["create_vm_draft"],
+        previous_include={"create_vm_draft", "prepare_vm_draft"},
+    )
+    assert result.mode == MODE_STICKY
+    assert result.include == {"create_vm_draft", "prepare_vm_draft"}
+    assert "list_elastic" not in result.include
+    assert len(result.include) < len(catalog)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shortlist_transport_failure_sticky_not_full_catalog():
+    settings = SystemOneSettings(base_url="http://systemone.test", max_tools=2)
     client = SystemOneClient(settings)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "answers": {
-                    "needs_tool": {"type": "noul", "noul": 0.9},
-                    "domain": {
-                        "type": "choice",
-                        "choice": "unknown",
-                        "confidence": 0.9,
-                        "probabilities": {"unknown": 0.9},
-                    },
-                }
-            },
-        )
+        return httpx.Response(500, json={"detail": "boom"})
 
-    transport = httpx.MockTransport(handler)
-    client._client = httpx.AsyncClient(base_url=settings.base_url, transport=transport)
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(handler),
+    )
     client._owns_client = True
 
-    names = await shortlist_tools(
+    catalog = [
+        _tool("list_vms", "vm"),
+        _tool("create_vm_draft", "vm"),
+        _tool("prepare_vm_draft", "vm"),
+        _tool("list_elastic", "elastic"),
+    ]
+    result = await shortlist_tools(
         client,
-        tools=[_tool("list_vms", "vm")],
-        user_input="列出云服务器",
-        recent_tool_names=[],
+        tools=catalog,
+        user_input="继续",
+        recent_tool_names=["create_vm_draft"],
+        previous_include={"create_vm_draft", "prepare_vm_draft", "commit_vm_draft"},
     )
-    assert names is None
+    assert result.mode == MODE_STICKY
+    assert result.include == {"create_vm_draft", "prepare_vm_draft"}
+    assert "list_elastic" not in result.include
     await client.aclose()
 
 

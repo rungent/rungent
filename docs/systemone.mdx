@@ -1,12 +1,47 @@
+---
+title: System One (Jev-compatible)
+description: Per-step tool shortlist via chat / act / sticky — aligned with the Jev agent harness.
+---
+
 # System One (Jev-compatible)
 
-Rungent can shortlist tools each model step with a System One decision endpoint
-(TypeSafe Jev wire protocol; production typically uses in-cluster **Laya**).
+Rungent shortlists tools **each model step** with a System One decision endpoint
+(TypeSafe [Jev](https://thejevai.com/docs) wire protocol; production typically uses in-cluster
+**Laya**). The control layer follows the
+[Jev agent harness](https://learnjev.com/tutorials/agent-harness): Noul decides whether any tool
+is needed; Choice picks which operation fits. Code owns permissions and fail-soft policy.
 
 ## Role
 
-- **Does:** pick domain / whether a tool is needed / which operation fits.
+- **Does:** decide chat vs act; pick one best operation; expand a small sticky family for draft workflows.
 - **Does not:** fill arguments, write prose, replace `approval="always"`, or enforce RBAC.
+
+## Contract (one evaluate per step)
+
+```text
+state = {
+  turn: <latest user text>,
+  recent_tools: [...],
+  focus: <focus ids>,
+  pending: <optional interaction summary>,
+}
+questions = {
+  tool: choice over the full business catalog (name → description),
+  needs_tool: noul + true/false criteria (Chinese instructions by default),
+}
+```
+
+| Condition | Mode | `include` (business tools) |
+| --- | --- | --- |
+| `needs_tool.noul < threshold` (default 0.5) | `chat` | empty — builtins only |
+| noul ≥ threshold and tool `confidence` ≥ threshold (default 0.6) | `act` | winner ∪ draft family, capped by `max_tools` |
+| transport failure or low confidence | `sticky` | previous step include, else draft/domain cap — **never** the full allowlist |
+
+Builtins (`request_input`, `report_progress`) are always attached by `Agent.tool_schemas`.
+
+**Draft family (deterministic):** names matching
+`create|prepare|commit|patch|get_<resource>_draft` share a resource. If the winner or
+`recent_tools` hit that pattern, the whole family is merged into `act` / `sticky` before the cap.
 
 ## Configure
 
@@ -19,14 +54,91 @@ runtime = create_openapi_runtime(
 )
 ```
 
-Env: `SYSTEMONE_BASE_URL`, optional `SYSTEMONE_MODEL`, `SYSTEMONE_TIMEOUT_SECONDS`,
-`SYSTEMONE_API_KEY`, thresholds `SYSTEMONE_NEEDS_TOOL_THRESHOLD`,
-`SYSTEMONE_CONFIDENCE_THRESHOLD`, `SYSTEMONE_MAX_TOOLS`.
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `SYSTEMONE_BASE_URL` | (required) | Laya / Jev base; trailing `/v1` stripped |
+| `SYSTEMONE_MODEL` | `multilingual` | Decision model id |
+| `SYSTEMONE_API_KEY` | — | Bearer for the endpoint |
+| `SYSTEMONE_TIMEOUT_SECONDS` | `5` | HTTP timeout |
+| `SYSTEMONE_NEEDS_TOOL_THRESHOLD` | `0.5` | Below → `chat` |
+| `SYSTEMONE_CONFIDENCE_THRESHOLD` | `0.6` | Below → `sticky` |
+| `SYSTEMONE_MAX_TOOLS` | `8` | Cap for `act` / `sticky` |
 
-When unset or the call fails / is low-confidence, Rungent **degrades to the full allowlist**
-(never an empty business-tool set) and logs.
+Logs each step: `mode`, `noul`, `choice`, `confidence`, `include_size`.
+
+## Diagrams
+
+### Components
+
+```mermaid
+flowchart LR
+  user[User] --> aidy[Host Aidy]
+  aidy --> runtime[Rungent AgentRuntime]
+  runtime --> s1client[SystemOneClient]
+  runtime --> llm[Host LLM]
+  s1client -->|HTTP| laya[Laya or Jev]
+  runtime -->|HttpOperation tools| console[Product HTTP APIs]
+```
+
+### Per model step
+
+```mermaid
+flowchart TD
+  start[model step] --> buildState["Build state\nturn=latest user"]
+  buildState --> oneCall["One POST /v1/systemone\ntool=choice catalog\nneeds_tool=noul"]
+  oneCall --> gate{needs_tool.noul}
+  gate -->|"noul < 0.5"| chat["mode=chat\ninclude=empty"]
+  gate -->|"noul >= 0.5"| conf{tool.confidence}
+  conf -->|"conf >= 0.6"| act["mode=act\nwinner + draft family"]
+  conf -->|"low conf or error"| sticky["mode=sticky\nprevious or family cap"]
+  chat --> schemas[tool_schemas + builtins]
+  act --> schemas
+  sticky --> schemas
+  schemas --> llmCall[LLM stream]
+```
+
+### Create intent (sequence)
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant RT as AgentRuntime
+  participant S1 as SystemOne
+  participant LLM as LLM
+  participant API as ProductAPI
+
+  U->>RT: create a VM
+  RT->>S1: choice + noul same request
+  S1-->>RT: high noul / create_vm_draft
+  RT->>RT: mode=act draft family
+  RT->>LLM: messages + shortlist
+  LLM-->>RT: tool_call create_vm_draft
+  RT->>API: POST create-drafts
+  Note over RT: Next step still one S1 call; sticky keeps prepare/commit
+```
+
+### Modes
+
+```mermaid
+stateDiagram-v2
+  [*] --> Decide: each model step
+  Decide --> Chat: low noul
+  Decide --> Act: high noul and confidence
+  Decide --> Sticky: failure or low confidence
+  Chat --> Decide
+  Act --> Decide
+  Sticky --> Decide
+```
 
 ## Security
 
-Pass structured `state` fields (turn, recent tools, focus). Do not concatenate
-untrusted tool output into question instructions. Keep permissions in code.
+Pass structured `state` fields (`turn`, `recent_tools`, `focus`, `pending`). Do not concatenate
+untrusted tool output into question instructions. Keep permissions, path allowlists, and spend
+caps in host code — System One advises; the runtime enforces.
+
+## Anti-patterns
+
+- Domain intermediate round then a second HTTP call for tools (catalogue fits in one Choice ≤255).
+- Low noul or low confidence → **full allowlist** (that inverts the harness and disables shortlisting).
+- Freezing `state.turn` to the original `run.input` instead of the latest user message.
+- Treating empty business `include` as a bug; `chat` mode intentionally exposes builtins only.
