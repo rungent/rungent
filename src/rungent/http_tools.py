@@ -1,9 +1,11 @@
 """Build Rungent tools from OpenAPI operations or an explicit allowlist."""
 
 import json
+import os
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -69,6 +71,7 @@ class HttpOperation:
     strip_ips: bool = False
     # When set (e.g. "inputs"), wrap a flat JSON object as {inputs: ...} if the key is absent.
     wrap_body: str | None = None
+    family: str | None = None
 
     def __post_init__(self) -> None:
         method = self.method.upper()
@@ -403,6 +406,7 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
         deduplicate=True,
         requires_interaction_response=False,
         domain=operation.domain,
+        family=operation.family,
     )
 
 
@@ -431,6 +435,8 @@ def operations_from_openapi(
 
     allowlist entries are (METHOD, path) with OpenAPI path templates.
     When require_aidy_flag is true, only operations with ``x-aidy: true`` / ``aidy: true`` are kept.
+    OpenAPI extensions ``x-aidy-domain``, ``x-aidy-family``, ``x-aidy-wrap-body``,
+    ``x-aidy-strip-ips`` are mapped onto HttpOperation when present.
     """
     allowed = {(method.upper(), path) for method, path in allowlist} if allowlist else None
     paths = spec.get("paths") or {}
@@ -445,16 +451,33 @@ def operations_from_openapi(
             method_u = method.upper()
             if method_u not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}:
                 continue
-            if allowed is not None and (method_u, path) not in allowed and (method_u, full_path) not in allowed:
-                continue
+            if allowed is not None:
+                aliases = _path_aliases(path) | _path_aliases(full_path)
+                allowed_hit = any(
+                    method_u == want_method and bool(aliases & _path_aliases(want_path))
+                    for want_method, want_path in allowed
+                )
+                if not allowed_hit:
+                    continue
             extra = operation.get("x-aidy") or operation.get("aidy")
             if require_aidy_flag and extra is not True:
                 continue
             tags = operation.get("tags") or []
-            domain = str(tags[0]).lower().replace(" ", "_") if tags else "general"
-            name = str(operation.get("operationId") or f"{method_u.lower()}_{path.strip('/').replace('/', '_').replace('{', '').replace('}', '')}")
+            domain = str(
+                operation.get("x-aidy-domain")
+                or (str(tags[0]).lower().replace(" ", "_") if tags else "general")
+            )
+            name = str(
+                operation.get("operationId")
+                or f"{method_u.lower()}_{path.strip('/').replace('/', '_').replace('{', '').replace('}', '')}"
+            )
             name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
-            summary = str(operation.get("summary") or operation.get("description") or name)
+            summary_parts = [
+                str(part).strip()
+                for part in (operation.get("summary"), operation.get("description"))
+                if part
+            ]
+            summary = " — ".join(dict.fromkeys(summary_parts)) if summary_parts else name
             properties: dict[str, Any] = {}
             required: list[str] = []
             for param in operation.get("parameters") or []:
@@ -472,20 +495,43 @@ def operations_from_openapi(
             body = (operation.get("requestBody") or {}).get("content", {})
             json_body = body.get("application/json") if isinstance(body, dict) else None
             if isinstance(json_body, dict) and json_body.get("schema"):
-                properties["body"] = {
-                    "type": "object",
-                    "description": "JSON request body",
-                }
-                if operation.get("requestBody", {}).get("required"):
-                    required.append("body")
+                body_schema = json_body["schema"]
+                desc = "JSON request body"
+                if isinstance(body_schema, dict) and body_schema.get("description"):
+                    desc = str(body_schema["description"])
+                if isinstance(body_schema, dict) and body_schema.get("type") == "object":
+                    for prop_name, prop_schema in (body_schema.get("properties") or {}).items():
+                        if prop_name in properties:
+                            continue
+                        if isinstance(prop_schema, dict):
+                            properties[prop_name] = prop_schema
+                        else:
+                            properties[prop_name] = {"type": "string"}
+                    for req in body_schema.get("required") or []:
+                        if req not in required:
+                            required.append(str(req))
+                properties.setdefault(
+                    "body",
+                    {"type": "object", "description": desc},
+                )
+                if operation.get("requestBody", {}).get("required") and "body" not in required:
+                    # Prefer flattened fields; body remains optional unless no properties.
+                    if len(properties) == 1:
+                        required.append("body")
+            family = operation.get("x-aidy-family")
+            wrap_body = operation.get("x-aidy-wrap-body")
+            strip_ips = bool(operation.get("x-aidy-strip-ips") or False)
             operations.append(
                 HttpOperation(
                     name=name,
                     method=method_u,
                     path=full_path,
-                    summary=summary[:300],
+                    summary=summary[:500],
                     domain=domain,
                     parameters={"type": "object", "properties": properties, "required": required},
+                    strip_ips=strip_ips,
+                    wrap_body=str(wrap_body) if wrap_body else None,
+                    family=str(family) if family else None,
                 )
             )
     return operations
@@ -497,3 +543,255 @@ def load_operations(data: Sequence[Mapping[str, Any]] | Mapping[str, Any]) -> li
     else:
         items = data
     return [item if isinstance(item, HttpOperation) else HttpOperation(**dict(item)) for item in items]
+
+
+_ENV_VAR = re.compile(r"\$\{([A-Z0-9_]+)\}")
+
+
+def _expand_env(template: str, env: Mapping[str, str] | None = None) -> str:
+    source = env if env is not None else os.environ
+
+    def repl(match: re.Match[str]) -> str:
+        return str(source.get(match.group(1), "") or "")
+
+    return _ENV_VAR.sub(repl, template)
+
+
+def _resolve_openapi_url(template: str, env: Mapping[str, str] | None = None) -> str:
+    expanded = _expand_env(template, env).strip()
+    if not expanded or "://" not in expanded:
+        return ""
+    return expanded
+
+
+def _normalize_template(path: str) -> str:
+    return _PATH_PARAM.sub("{}", path)
+
+
+def _override_key(method: str, path: str) -> str:
+    return f"{method.upper()} {path}"
+
+
+def _lookup_override(
+    overrides: Mapping[str, Mapping[str, Any]],
+    *,
+    method: str,
+    path: str,
+    name: str,
+) -> Mapping[str, Any]:
+    exact = overrides.get(_override_key(method, path))
+    if exact:
+        return exact
+    norm = _normalize_template(path)
+    for key, value in overrides.items():
+        if " " not in key:
+            continue
+        key_method, key_path = key.split(" ", 1)
+        if key_method.upper() == method.upper() and _normalize_template(key_path) == norm:
+            return value
+    return overrides.get(name) or {}
+
+
+def _path_aliases(path: str) -> set[str]:
+    norms = {_normalize_template(path)}
+    if path.startswith("/api/") or path == "/api":
+        norms.add(_normalize_template(path.removeprefix("/api") or "/"))
+    else:
+        norms.add(_normalize_template(f"/api{path}" if path.startswith("/") else f"/api/{path}"))
+    return norms
+
+
+def _include_matches(method: str, path: str, include: Sequence[tuple[str, str]]) -> bool:
+    aliases = _path_aliases(path)
+    for want_method, want_path in include:
+        if method != want_method:
+            continue
+        if aliases & _path_aliases(want_path):
+            return True
+    return False
+
+
+def _apply_operation_overrides(
+    operations: list[HttpOperation],
+    overrides: Mapping[str, Mapping[str, Any]] | None,
+) -> list[HttpOperation]:
+    if not overrides:
+        return operations
+    result: list[HttpOperation] = []
+    for operation in operations:
+        patch = _lookup_override(
+            overrides, method=operation.method, path=operation.path, name=operation.name
+        )
+        if not patch:
+            result.append(operation)
+            continue
+        data = {
+            "name": operation.name,
+            "method": operation.method,
+            "path": operation.path,
+            "summary": operation.summary,
+            "domain": operation.domain,
+            "parameters": operation.parameters,
+            "effect": operation.effect,
+            "approval": operation.approval,
+            "confirmation": operation.confirmation,
+            "timeout_seconds": operation.timeout_seconds,
+            "strip_ips": operation.strip_ips,
+            "wrap_body": operation.wrap_body,
+            "family": operation.family,
+        }
+        data.update({key: value for key, value in patch.items() if value is not None})
+        result.append(HttpOperation(**data))
+    return result
+
+
+def _fetch_openapi_spec(url: str, *, timeout_seconds: float = 15.0) -> dict[str, Any]:
+    response = httpx.get(url, timeout=timeout_seconds)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"OpenAPI response is not an object: {url}")
+    return dict(payload)
+
+
+def _read_openapi_file(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"OpenAPI file is not an object: {path}")
+    return dict(payload)
+
+
+def load_operations_from_config(
+    path: str | Path,
+    *,
+    env: Mapping[str, str] | None = None,
+    specs: Mapping[str, Mapping[str, Any]] | None = None,
+    timeout_seconds: float = 15.0,
+) -> list[HttpOperation]:
+    """Load HTTP operations from a thin OpenAPI tools config.
+
+    Config shape::
+
+        {
+          "sources": [
+            {
+              "id": "cs",
+              "openapi_url": "${GATEWAY_CS_URL}/openapi.json",
+              "openapi_file": "openapi-cs.snapshot.json",
+              "path_prefix": "/api"
+            }
+          ],
+          "include": [["GET", "/vm"], ["GET", "/api/user/me"]],
+          "overrides": {"GET /api/vm": {"name": "list_vms", "family": "vm"}},
+          "static_operations": []
+        }
+
+    For each source: use ``specs[id]`` if provided; else HTTP ``openapi_url`` when it
+    expands to a full URL; else ``openapi_file`` relative to the config directory.
+    Live URL fetch failures raise (no silent empty catalog).
+    """
+    config_path = Path(path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Tools config must be an object: {config_path}")
+
+    # Legacy allowlist shape still supported.
+    if "operations" in payload and "sources" not in payload:
+        return load_operations(payload)
+
+    include_raw = payload.get("include") or []
+    include: list[tuple[str, str]] | None = None
+    if include_raw:
+        include = []
+        for item in include_raw:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                include.append((str(item[0]).upper(), str(item[1])))
+            elif isinstance(item, Mapping):
+                include.append((str(item["method"]).upper(), str(item["path"])))
+            else:
+                raise ValueError(f"Invalid include entry: {item!r}")
+
+    require_aidy_flag = bool(payload.get("require_aidy_flag") or False)
+    operations: list[HttpOperation] = []
+    seen: set[tuple[str, str]] = set()
+
+    for source in payload.get("sources") or []:
+        if not isinstance(source, Mapping):
+            raise ValueError(f"Invalid OpenAPI source: {source!r}")
+        source_id = str(
+            source.get("id") or source.get("openapi_url") or source.get("openapi_file") or "source"
+        )
+        path_prefix = str(source.get("path_prefix") or "")
+        spec: Mapping[str, Any] | None = None
+        if specs and source_id in specs:
+            spec = specs[source_id]
+        else:
+            url_template = str(source.get("openapi_url") or "")
+            url = _resolve_openapi_url(url_template, env) if url_template else ""
+            file_name = str(source.get("openapi_file") or "").strip()
+            file_path: Path | None = None
+            if file_name:
+                file_path = Path(file_name)
+                if not file_path.is_absolute():
+                    file_path = config_path.parent / file_path
+            if url:
+                try:
+                    spec = _fetch_openapi_spec(url, timeout_seconds=timeout_seconds)
+                except Exception as exc:
+                    if file_path is not None and file_path.is_file():
+                        logger = __import__("logging").getLogger(__name__)
+                        logger.warning(
+                            "OpenAPI fetch failed for %s (%s); using snapshot %s",
+                            url,
+                            exc,
+                            file_path,
+                        )
+                        spec = _read_openapi_file(file_path)
+                    else:
+                        raise RuntimeError(f"Failed to fetch OpenAPI from {url}: {exc}") from exc
+            else:
+                if file_path is None:
+                    raise ValueError(
+                        f"OpenAPI source {source_id!r} needs openapi_url, openapi_file, "
+                        f"or specs[{source_id!r}]"
+                    )
+                spec = _read_openapi_file(file_path)
+        parsed = operations_from_openapi(
+            spec,
+            allowlist=include,
+            require_aidy_flag=require_aidy_flag,
+            path_prefix=path_prefix,
+        )
+        for operation in parsed:
+            key = (operation.method, operation.path)
+            if key in seen:
+                continue
+            seen.add(key)
+            operations.append(operation)
+
+    for item in payload.get("static_operations") or []:
+        operation = item if isinstance(item, HttpOperation) else HttpOperation(**dict(item))
+        key = (operation.method, operation.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        operations.append(operation)
+
+    overrides = payload.get("overrides")
+    if overrides is not None and not isinstance(overrides, Mapping):
+        raise ValueError("overrides must be an object")
+    operations = _apply_operation_overrides(
+        operations, overrides if isinstance(overrides, Mapping) else None
+    )
+
+    if include is not None:
+        operations = [
+            op for op in operations if _include_matches(op.method, op.path, include)
+        ]
+
+    if not operations:
+        raise ValueError(f"No HTTP operations loaded from {config_path}")
+    names = [op.name for op in operations]
+    if len(names) != len(set(names)):
+        raise ValueError(f"Duplicate HTTP tool names after OpenAPI load: {names}")
+    return operations

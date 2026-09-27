@@ -2,7 +2,6 @@
 
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,13 +12,38 @@ from .tools import Tool
 logger = logging.getLogger(__name__)
 
 _BUILTIN = frozenset({"request_input", "report_progress"})
-_DRAFT_NAME = re.compile(
-    r"^(?P<action>create|prepare|commit|patch|get)_(?P<resource>.+)_draft$"
-)
 
 MODE_CHAT = "chat"
 MODE_ACT = "act"
 MODE_STICKY = "sticky"
+
+# Product-neutral Noul questions (skill-suggestion style). Gate uses the mean.
+_NOUL_QUESTIONS: dict[str, dict[str, Any]] = {
+    "needs_tool": {
+        "type": "noul",
+        "instructions": "Does `turn` require calling any API or tool, rather than answering in prose alone?",
+        "criteria": {
+            "true": "The user asks to list, create, change, start/stop, delete, or otherwise query external resources via tools",
+            "false": "Greeting, conceptual explanation, or an answer that needs no new tool call",
+        },
+    },
+    "acts_on_resources": {
+        "type": "noul",
+        "instructions": "Does `turn` intend to inspect or change external resources (not pure explanation)?",
+        "criteria": {
+            "true": "The user wants resource state, inventory, or a mutating action",
+            "false": "The user only wants concepts, opinions, or chatter",
+        },
+    },
+    "prose_suffices": {
+        "type": "noul",
+        "instructions": "Can `turn` be fully answered with natural language and existing context, with no tool call?",
+        "criteria": {
+            "true": "No tool is needed; prose or prior context is enough",
+            "false": "At least one tool call is required to satisfy the user",
+        },
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,22 +128,6 @@ class SystemOneClient:
         return answers
 
 
-def _draft_resource(name: str) -> str | None:
-    match = _DRAFT_NAME.match(name)
-    return match.group("resource") if match else None
-
-
-def _draft_family(tools: list[Tool], seeds: list[str] | set[str]) -> set[str]:
-    resources = {res for name in seeds if (res := _draft_resource(name))}
-    if not resources:
-        return set()
-    return {
-        tool.name
-        for tool in tools
-        if (res := _draft_resource(tool.name)) and res in resources
-    }
-
-
 def _cap_names(names: list[str], *, limit: int) -> set[str]:
     if limit <= 0:
         return set()
@@ -131,6 +139,29 @@ def _domain_cap(tools: list[Tool], *, domain: str, limit: int) -> set[str]:
     return _cap_names(ordered, limit=limit)
 
 
+def _family_of(tool: Tool | None) -> str | None:
+    if tool is None:
+        return None
+    family = getattr(tool, "family", None)
+    if family is None:
+        return None
+    text = str(family).strip()
+    return text or None
+
+
+def _family_expand(tools: list[Tool], seeds: list[str] | set[str]) -> set[str]:
+    by_name = {tool.name: tool for tool in tools}
+    families = {_family_of(by_name.get(name)) for name in seeds}
+    families.discard(None)
+    if not families:
+        return set()
+    return {
+        tool.name
+        for tool in tools
+        if _family_of(tool) in families
+    }
+
+
 def _expand_act_include(
     tools: list[Tool],
     *,
@@ -138,19 +169,19 @@ def _expand_act_include(
     max_tools: int,
 ) -> set[str]:
     by_name = {tool.name: tool for tool in tools}
-    if winner not in by_name:
-        # Unknown winner: keep draft family from name alone if parseable, else empty act set.
-        family = _draft_family(tools, [winner])
-        return _cap_names([winner, *sorted(family)], limit=max_tools) if family else set()
-
-    family = _draft_family(tools, [winner])
+    winner_tool = by_name.get(winner)
     ordered: list[str] = [winner]
+
+    family = _family_expand(tools, [winner])
     for name in sorted(family):
-        if name != winner and name not in ordered:
+        if name not in ordered:
             ordered.append(name)
 
+    if winner_tool is None:
+        return _cap_names(ordered, limit=max_tools)
+
     winner_tokens = set(winner.split("_"))
-    domain = by_name[winner].domain or "general"
+    domain = winner_tool.domain or "general"
     siblings = [
         tool
         for tool in tools
@@ -184,7 +215,7 @@ def _sticky_include(
     seeds = list(recent_tool_names)
     if winner:
         seeds.append(winner)
-    family = _draft_family(tools, seeds)
+    family = _family_expand(tools, seeds)
     if family:
         return _cap_names(sorted(family), limit=max_tools)
 
@@ -203,6 +234,21 @@ def _sticky_include(
     return _cap_names([tool.name for tool in tools], limit=max_tools)
 
 
+def _noul_value(answers: dict[str, Any], key: str) -> float:
+    raw = answers.get(key) or {}
+    if isinstance(raw, dict):
+        return float(raw.get("noul") or 0)
+    return 0.0
+
+
+def _gate_noul(answers: dict[str, Any]) -> float:
+    needs = _noul_value(answers, "needs_tool")
+    acts = _noul_value(answers, "acts_on_resources")
+    prose = _noul_value(answers, "prose_suffices")
+    # prose_suffices is inverted: high prose → lower tool need.
+    return (needs + acts + (1.0 - prose)) / 3.0
+
+
 async def shortlist_tools(
     client: SystemOneClient,
     *,
@@ -216,8 +262,8 @@ async def shortlist_tools(
     """Return a harness shortlist for this model step.
 
     Aligns with the Jev agent-harness contract:
-    - low ``needs_tool`` noul → chat (no business tools)
-    - high noul + confident choice → act (winner + draft family)
+    - low gate noul → chat (no business tools)
+    - high noul + confident choice → act (winner + family/domain expand)
     - failure / low confidence → sticky (previous or capped family), never full catalog
     """
     if not tools:
@@ -235,17 +281,10 @@ async def shortlist_tools(
     questions: dict[str, Any] = {
         "tool": {
             "type": "choice",
-            "instructions": "哪个 API 操作最能完成 `turn`？",
+            "instructions": "Which API or tool best completes `turn`?",
             "criteria": tool_criteria,
         },
-        "needs_tool": {
-            "type": "noul",
-            "instructions": "`turn` 是否需要调用控制台 API 工具，而不是直接用自然语言回答？",
-            "criteria": {
-                "true": "用户要求列出、创建、修改、开关机或查询控制台资源，需要新的 API 调用",
-                "false": "用户寒暄、询问概念解释，或仅凭已有上下文即可回答",
-            },
-        },
+        **_NOUL_QUESTIONS,
     }
     try:
         answers = await client.evaluate(state=state, questions=questions)
@@ -264,8 +303,7 @@ async def shortlist_tools(
         )
         return ShortlistResult(mode=MODE_STICKY, include=include)
 
-    needs = answers.get("needs_tool") or {}
-    noul = float(needs.get("noul") if isinstance(needs, dict) else 0)
+    noul = _gate_noul(answers)
     pick = answers.get("tool") or {}
     winner = str(pick.get("choice") or "") if isinstance(pick, dict) else ""
     confidence = float(pick.get("confidence") or 0) if isinstance(pick, dict) else 0.0

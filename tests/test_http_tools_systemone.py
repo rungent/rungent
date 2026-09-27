@@ -1,13 +1,19 @@
 """Tests for System One shortlist and HTTP allowlist tools."""
 
 import json
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 from rungent import ToolContext, create_openapi_agent
-from rungent.http_tools import HttpOperation, HttpToolSettings, tools_from_operations
+from rungent.http_tools import (
+    HttpOperation,
+    HttpToolSettings,
+    load_operations_from_config,
+    tools_from_operations,
+)
 from rungent.state import Identity
 from rungent.systemone import (
     MODE_ACT,
@@ -29,7 +35,7 @@ async def _noop(ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
     return {"ok": True}
 
 
-def _tool(name: str, domain: str) -> Tool:
+def _tool(name: str, domain: str, *, family: str | None = None) -> Tool:
     return Tool(
         name=name,
         description=f"{name} does {domain}",
@@ -45,6 +51,7 @@ def _tool(name: str, domain: str) -> Tool:
         deduplicate=True,
         requires_interaction_response=False,
         domain=domain,
+        family=family,
     )
 
 
@@ -53,11 +60,27 @@ def _one_shot_answers(answers: dict[str, Any]):
         payload = json.loads(request.content)
         assert "tool" in payload["questions"]
         assert "needs_tool" in payload["questions"]
+        assert "acts_on_resources" in payload["questions"]
+        assert "prose_suffices" in payload["questions"]
         assert payload["questions"]["needs_tool"]["type"] == "noul"
         assert "criteria" in payload["questions"]["needs_tool"]
         return httpx.Response(200, json={"answers": answers})
 
     return handler
+
+
+def _high_gate_answers(*, choice: str, confidence: float = 0.95) -> dict[str, Any]:
+    return {
+        "needs_tool": {"type": "noul", "noul": 0.9},
+        "acts_on_resources": {"type": "noul", "noul": 0.9},
+        "prose_suffices": {"type": "noul", "noul": 0.1},
+        "tool": {
+            "type": "choice",
+            "choice": choice,
+            "confidence": confidence,
+            "probabilities": {choice: confidence},
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -66,19 +89,7 @@ async def test_shortlist_act_picks_tool_not_other_domain():
     client = SystemOneClient(settings)
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
-        transport=httpx.MockTransport(
-            _one_shot_answers(
-                {
-                    "needs_tool": {"type": "noul", "noul": 0.9},
-                    "tool": {
-                        "type": "choice",
-                        "choice": "list_vms",
-                        "confidence": 0.95,
-                        "probabilities": {"list_vms": 0.95, "list_elastic": 0.05},
-                    },
-                }
-            )
-        ),
+        transport=httpx.MockTransport(_one_shot_answers(_high_gate_answers(choice="list_vms"))),
     )
     client._owns_client = True
 
@@ -95,7 +106,7 @@ async def test_shortlist_act_picks_tool_not_other_domain():
 
 
 @pytest.mark.asyncio
-async def test_shortlist_act_merges_draft_family_within_max_tools():
+async def test_shortlist_act_merges_family_within_max_tools():
     settings = SystemOneSettings(
         base_url="http://systemone.test",
         confidence_threshold=0.5,
@@ -105,17 +116,7 @@ async def test_shortlist_act_merges_draft_family_within_max_tools():
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
         transport=httpx.MockTransport(
-            _one_shot_answers(
-                {
-                    "needs_tool": {"type": "noul", "noul": 0.9},
-                    "tool": {
-                        "type": "choice",
-                        "choice": "create_vm_draft",
-                        "confidence": 0.95,
-                        "probabilities": {"create_vm_draft": 0.95},
-                    },
-                }
-            )
+            _one_shot_answers(_high_gate_answers(choice="create_vm_draft"))
         ),
     )
     client._owns_client = True
@@ -126,10 +127,10 @@ async def test_shortlist_act_merges_draft_family_within_max_tools():
             _tool("list_zones", "vm"),
             _tool("list_vms", "vm"),
             _tool("get_vm", "vm"),
-            _tool("create_vm_draft", "vm"),
-            _tool("prepare_vm_draft", "vm"),
-            _tool("commit_vm_draft", "vm"),
-            _tool("patch_vm_draft", "vm"),
+            _tool("create_vm_draft", "vm", family="vm_draft"),
+            _tool("prepare_vm_draft", "vm", family="vm_draft"),
+            _tool("commit_vm_draft", "vm", family="vm_draft"),
+            _tool("patch_vm_draft", "vm", family="vm_draft"),
         ],
         user_input="创建一台云服务器",
         recent_tool_names=[],
@@ -153,6 +154,8 @@ async def test_shortlist_low_noul_is_chat_empty_include():
             _one_shot_answers(
                 {
                     "needs_tool": {"type": "noul", "noul": 0.2},
+                    "acts_on_resources": {"type": "noul", "noul": 0.2},
+                    "prose_suffices": {"type": "noul", "noul": 0.9},
                     "tool": {
                         "type": "choice",
                         "choice": "list_vms",
@@ -189,7 +192,7 @@ async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
         transport=httpx.MockTransport(
             _one_shot_answers(
                 {
-                    "needs_tool": {"type": "noul", "noul": 0.9},
+                    **_high_gate_answers(choice="create_vm_draft", confidence=0.4),
                     "tool": {
                         "type": "choice",
                         "choice": "create_vm_draft",
@@ -205,9 +208,9 @@ async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
     catalog = [
         _tool("list_zones", "vm"),
         _tool("list_vms", "vm"),
-        _tool("create_vm_draft", "vm"),
-        _tool("prepare_vm_draft", "vm"),
-        _tool("commit_vm_draft", "vm"),
+        _tool("create_vm_draft", "vm", family="vm_draft"),
+        _tool("prepare_vm_draft", "vm", family="vm_draft"),
+        _tool("commit_vm_draft", "vm", family="vm_draft"),
         _tool("list_elastic", "elastic"),
     ]
     result = await shortlist_tools(
@@ -240,8 +243,8 @@ async def test_shortlist_transport_failure_sticky_not_full_catalog():
 
     catalog = [
         _tool("list_vms", "vm"),
-        _tool("create_vm_draft", "vm"),
-        _tool("prepare_vm_draft", "vm"),
+        _tool("create_vm_draft", "vm", family="vm_draft"),
+        _tool("prepare_vm_draft", "vm", family="vm_draft"),
         _tool("list_elastic", "elastic"),
     ]
     result = await shortlist_tools(
@@ -440,3 +443,59 @@ def test_create_openapi_agent_builds_tools():
         http=HttpToolSettings(base_url="http://gw.test"),
     )
     assert [tool.name for tool in agent.tools] == ["list_vms"]
+
+
+def test_load_operations_from_config_uses_snapshot_and_overrides(tmp_path: Path):
+    snapshot = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/vm": {
+                "get": {
+                    "operationId": "list_vms_openapi",
+                    "summary": "List virtual machines",
+                    "description": "Paginated VM inventory",
+                    "tags": ["虚拟机"],
+                    "parameters": [
+                        {
+                            "name": "page",
+                            "in": "query",
+                            "schema": {"type": "integer"},
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    snapshot_path = tmp_path / "cs.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    config_path = tmp_path / "tools.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "id": "cs",
+                        "openapi_file": "cs.json",
+                        "path_prefix": "/api",
+                    }
+                ],
+                "include": [["GET", "/vm"]],
+                "overrides": {
+                    "GET /api/vm": {
+                        "name": "list_vms",
+                        "domain": "vm",
+                        "family": "vm",
+                        "strip_ips": True,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    ops = load_operations_from_config(config_path)
+    assert len(ops) == 1
+    assert ops[0].name == "list_vms"
+    assert ops[0].path == "/api/vm"
+    assert ops[0].strip_ips is True
+    assert ops[0].family == "vm"
+    assert "Paginated" in ops[0].summary

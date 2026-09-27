@@ -1,6 +1,12 @@
 from .agent import Agent, RunActivity
 from .execution import ResourceRef, ToolExecution
-from .http_tools import HttpOperation, HttpToolSettings, operations_from_openapi, tools_from_operations
+from .http_tools import (
+    HttpOperation,
+    HttpToolSettings,
+    load_operations_from_config,
+    operations_from_openapi,
+    tools_from_operations,
+)
 from .presets import create_openapi_agent, create_openapi_runtime, load_allowlist_file
 from .runtime import Runtime
 from .state import (
@@ -41,6 +47,7 @@ __all__ = [
     "create_openapi_agent",
     "create_openapi_runtime",
     "load_allowlist_file",
+    "load_operations_from_config",
     "operations_from_openapi",
     "tool",
     "tools_from_operations",

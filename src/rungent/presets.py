@@ -10,6 +10,7 @@ from .http_tools import (
     HttpOperation,
     HttpToolSettings,
     load_operations,
+    load_operations_from_config,
     operations_from_openapi,
     tools_from_operations,
 )
@@ -23,7 +24,10 @@ ContextProvider = Callable[[ToolContext], str | Awaitable[str]]
 
 
 def load_allowlist_file(path: str | Path) -> list[HttpOperation]:
+    """Load operations from a legacy allowlist or a thin OpenAPI tools config."""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(payload, Mapping) and "sources" in payload:
+        return load_operations_from_config(path)
     return load_operations(payload)
 
 
@@ -104,6 +108,7 @@ __all__ = [
     "create_openapi_runtime",
     "load_allowlist_file",
     "load_operations",
+    "load_operations_from_config",
     "operations_from_openapi",
     "tools_from_operations",
 ]

@@ -11,9 +11,12 @@ Rungent shortlists tools **each model step** with a System One decision endpoint
 [Jev agent harness](https://learnjev.com/tutorials/agent-harness): Noul decides whether any tool
 is needed; Choice picks which operation fits. Code owns permissions and fail-soft policy.
 
+Hosts plug in with `SystemOneSettings.from_env()` only — no product-specific shortlist code in the
+library, and no System One policy modules in the host.
+
 ## Role
 
-- **Does:** decide chat vs act; pick one best operation; expand a small sticky family for draft workflows.
+- **Does:** decide chat vs act; pick one best operation; expand via `domain` / name tokens / optional `family` metadata.
 - **Does not:** fill arguments, write prose, replace `approval="always"`, or enforce RBAC.
 
 ## Contract (one evaluate per step)
@@ -27,21 +30,21 @@ state = {
 }
 questions = {
   tool: choice over the full business catalog (name → description),
-  needs_tool: noul + true/false criteria (Chinese instructions by default),
+  needs_tool / acts_on_resources / prose_suffices: product-neutral Nouls,
 }
+gate = mean(needs_tool, acts_on_resources, 1 - prose_suffices)
 ```
 
 | Condition | Mode | `include` (business tools) |
 | --- | --- | --- |
-| `needs_tool.noul < threshold` (default 0.5) | `chat` | empty — builtins only |
-| noul ≥ threshold and tool `confidence` ≥ threshold (default 0.6) | `act` | winner ∪ draft family, capped by `max_tools` |
-| transport failure or low confidence | `sticky` | previous step include, else draft/domain cap — **never** the full allowlist |
+| `gate < threshold` (default 0.5) | `chat` | empty — builtins only |
+| gate ≥ threshold and tool `confidence` ≥ threshold (default 0.6) | `act` | winner ∪ family/domain expand, capped by `max_tools` |
+| transport failure or low confidence | `sticky` | previous step include, else family/domain cap — **never** the full catalog |
 
 Builtins (`request_input`, `report_progress`) are always attached by `Agent.tool_schemas`.
 
-**Draft family (deterministic):** names matching
-`create|prepare|commit|patch|get_<resource>_draft` share a resource. If the winner or
-`recent_tools` hit that pattern, the whole family is merged into `act` / `sticky` before the cap.
+**Expand (deterministic):** optional `Tool.family` / `HttpOperation.family` groups draft-style
+workflows; otherwise same `domain` plus shared name tokens. Hosts set family as **data** on tools.
 
 ## Configure
 
@@ -66,6 +69,12 @@ runtime = create_openapi_runtime(
 
 Logs each step: `mode`, `noul`, `choice`, `confidence`, `include_size`.
 
+## OpenAPI tool source
+
+Prefer a thin host config (`sources` + `include` + `overrides`) loaded with
+`load_operations_from_config` / `load_allowlist_file`. Specs come from in-cluster OpenAPI URLs
+(or snapshot files for offline tests). Tool **execution** still uses the host loopback base URL.
+
 ## Diagrams
 
 ### Components
@@ -85,36 +94,16 @@ flowchart LR
 ```mermaid
 flowchart TD
   start[model step] --> buildState["Build state\nturn=latest user"]
-  buildState --> oneCall["One POST /v1/systemone\ntool=choice catalog\nneeds_tool=noul"]
-  oneCall --> gate{needs_tool.noul}
+  buildState --> oneCall["One POST /v1/systemone\ntool=choice catalog\nmulti Noul mean"]
+  oneCall --> gate{gate noul}
   gate -->|"noul < 0.5"| chat["mode=chat\ninclude=empty"]
   gate -->|"noul >= 0.5"| conf{tool.confidence}
-  conf -->|"conf >= 0.6"| act["mode=act\nwinner + draft family"]
-  conf -->|"low conf or error"| sticky["mode=sticky\nprevious or family cap"]
+  conf -->|"conf >= 0.6"| act["mode=act\nwinner + expand"]
+  conf -->|"low conf or error"| sticky["mode=sticky\nprevious or family/domain cap"]
   chat --> schemas[tool_schemas + builtins]
   act --> schemas
   sticky --> schemas
   schemas --> llmCall[LLM stream]
-```
-
-### Create intent (sequence)
-
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant RT as AgentRuntime
-  participant S1 as SystemOne
-  participant LLM as LLM
-  participant API as ProductAPI
-
-  U->>RT: create a VM
-  RT->>S1: choice + noul same request
-  S1-->>RT: high noul / create_vm_draft
-  RT->>RT: mode=act draft family
-  RT->>LLM: messages + shortlist
-  LLM-->>RT: tool_call create_vm_draft
-  RT->>API: POST create-drafts
-  Note over RT: Next step still one S1 call; sticky keeps prepare/commit
 ```
 
 ### Modes
@@ -142,3 +131,4 @@ caps in host code — System One advises; the runtime enforces.
 - Low noul or low confidence → **full allowlist** (that inverts the harness and disables shortlisting).
 - Freezing `state.turn` to the original `run.input` instead of the latest user message.
 - Treating empty business `include` as a bug; `chat` mode intentionally exposes builtins only.
+- Baking product language or draft name regexes into the library harness.

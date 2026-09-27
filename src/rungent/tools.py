@@ -103,6 +103,7 @@ class Tool:
     deduplicate: bool
     requires_interaction_response: bool
     domain: str | None = None
+    family: str | None = None
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -186,6 +187,7 @@ def tool(
     deduplicate: bool = True,
     requires_interaction_response: bool = False,
     domain: str | None = None,
+    family: str | None = None,
 ) -> Callable[[ToolFunction], Tool]:
     def decorate(fn: ToolFunction) -> Tool:
         tool_name = name or fn.__name__
@@ -212,6 +214,7 @@ def tool(
             deduplicate=deduplicate,
             requires_interaction_response=requires_interaction_response,
             domain=domain,
+            family=family,
         )
 
     return decorate
