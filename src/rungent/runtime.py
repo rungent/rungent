@@ -2324,7 +2324,7 @@ class Runtime:
         emitter: EventEmitter,
     ) -> AsyncIterator[Event]:
         redacted_arguments = redact(call.arguments)
-        started_execution = execution_payload(arguments=call.arguments)
+        started_execution = execution_payload(arguments=call.arguments, status="running")
         yield await self._emit(
             emitter,
             "tool.started",

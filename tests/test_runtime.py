@@ -2022,6 +2022,7 @@ async def test_tool_started_includes_redacted_arguments_and_execution():
     started = next(event for event in events if event.type == "tool.started")
     assert started.data["arguments"] == {"city": "paris"}
     assert started.data["execution"]["arguments"] == {"city": "paris"}
+    assert started.data["execution"]["status"] == "running"
     completed = next(event for event in events if event.type == "tool.completed")
     assert completed.data["execution"]["targets"] == [
         {"resource_type": "CITY", "resource_id": "paris"}
