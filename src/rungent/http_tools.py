@@ -223,12 +223,26 @@ def _create_draft_resource_path(url_path: str) -> str | None:
     return None
 
 
-def _confirmation_for(operation: HttpOperation) -> str | None:
-    if _default_approval(operation.method) is ApprovalPolicy.NEVER and not operation.approval:
-        return None
-    if operation.confirmation:
-        return operation.confirmation
-    return f"确认调用 {operation.method} {operation.path}？"
+class _FormatMap(dict[str, Any]):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _http_error_message(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return "请求失败"
+    detail = payload.get("detail")
+    if isinstance(detail, list):
+        return "参数不合法，请检查后重试"
+    if isinstance(detail, dict):
+        message = detail.get("msg") or detail.get("message") or detail.get("detail")
+        if message:
+            return str(message).strip()[:500] or "请求失败"
+    for key in ("message", "detail", "error"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:500]
+    return "请求失败"
 
 
 async def _resolve_auth(
@@ -251,19 +265,89 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
         if operation.approval
         else _default_approval(operation.method)
     )
-    confirmation = _confirmation_for(operation) if approval is ApprovalPolicy.ALWAYS else None
 
     async def _confirm(ctx: ToolContext, **arguments: Any) -> ApprovalImpact:
-        target = _format_path(operation.path, arguments)
+        path_values = {
+            name: arguments[name]
+            for name in _PATH_PARAM.findall(operation.path)
+            if name in arguments and arguments[name] is not None
+        }
+        try:
+            url_path = _format_path(operation.path, path_values)
+        except ValueError:
+            url_path = operation.path
+
+        draft_path = _create_draft_resource_path(url_path)
+        if draft_path and url_path.rstrip("/").endswith("/commit"):
+            headers: dict[str, str] = {"Accept": "application/json"}
+            auth = await _resolve_auth(settings, ctx)
+            if auth:
+                headers["Authorization"] = (
+                    auth if auth.lower().startswith("bearer ") else f"Bearer {auth}"
+                )
+            client = settings.client
+            owns = False
+            if client is None:
+                client = httpx.AsyncClient(timeout=operation.timeout_seconds)
+                owns = True
+            try:
+                response = await client.request(
+                    "GET",
+                    f"{settings.base_url}{draft_path}",
+                    headers=headers,
+                )
+                try:
+                    payload: Any = response.json()
+                except Exception:
+                    payload = None
+            finally:
+                if owns:
+                    await client.aclose()
+            if (
+                200 <= response.status_code < 300
+                and isinstance(payload, dict)
+                and isinstance(payload.get("confirmation"), dict)
+            ):
+                confirmation = payload["confirmation"]
+                fields = confirmation.get("fields") or {}
+                if not isinstance(fields, dict):
+                    fields = {}
+                title = str(confirmation.get("title") or operation.summary or "确认创建云服务器")
+                target = str(fields.get("名称") or arguments.get("draft_id") or title)
+                changes = [f"{key}：{value}" for key, value in fields.items()]
+                effect_text = "提交后将占用配额并开始开通"
+                if operation.confirmation:
+                    effect_text = (
+                        operation.confirmation.format_map(_FormatMap(arguments)).strip()
+                        or effect_text
+                    )
+                return ApprovalImpact(
+                    title=title,
+                    target_label=target,
+                    effect=effect_text,
+                    changes=changes,
+                )
+
+        if operation.confirmation:
+            title = operation.confirmation.format_map(_FormatMap(arguments)).strip()
+            if not title:
+                title = operation.summary or operation.name
+            target = str(
+                arguments.get("id")
+                or arguments.get("draft_id")
+                or arguments.get("name")
+                or title
+            )
+            return ApprovalImpact(title=title, target_label=target, effect=title)
+
         title = operation.summary or operation.name
-        body = arguments.get("body")
-        detail = ""
-        if isinstance(body, dict) and body:
-            detail = json.dumps(settings.redact(body), ensure_ascii=False)[:400]
-        effect_text = f"{operation.method} {target}"
-        if detail:
-            effect_text = f"{effect_text}\n{detail}"
-        return ApprovalImpact(title=title, target_label=target, effect=effect_text)
+        target = str(
+            arguments.get("id")
+            or arguments.get("draft_id")
+            or arguments.get("name")
+            or title
+        )
+        return ApprovalImpact(title=title, target_label=target, effect=title)
 
     async def execute(ctx: ToolContext, **arguments: Any) -> ToolResult:
         path_values = {
@@ -373,7 +457,9 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
                     key: value for key, value in arguments.items() if value is not None
                 }
                 return ToolResult(
-                    message=str(
+                    message=_http_error_message(payload)
+                    if isinstance(payload, dict) and isinstance(payload.get("detail"), list)
+                    else str(
                         (payload.get("detail") if isinstance(payload, dict) else None)
                         or "需要补充参数"
                     ),
@@ -390,11 +476,12 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
                 )
 
         ok = 200 <= response.status_code < 300
-        message = None
-        if isinstance(payload, dict):
-            message = payload.get("message") or payload.get("detail")
+        message = None if ok else _http_error_message(payload)
+        if ok and isinstance(payload, dict):
+            raw = payload.get("message")
+            message = str(raw) if raw else None
         return ToolResult(
-            message=str(message) if message else None,
+            message=message,
             data={"ok": ok, "status_code": response.status_code, "body": public},
             public={"status_code": response.status_code, "body": public},
         )

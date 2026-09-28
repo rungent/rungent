@@ -1,4 +1,5 @@
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -7,6 +8,8 @@ from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from .state import ApprovalImpact, Identity, ToolResult, TrustedInteractionResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ToolEffect(StrEnum):
@@ -116,11 +119,16 @@ class Tool:
         }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        allowed = set(self.input_model.model_fields)
+        unknown = sorted(key for key in arguments if key not in allowed)
+        if unknown:
+            logger.warning("tool %s dropping unknown arguments: %s", self.name, unknown)
+            arguments = {key: value for key, value in arguments.items() if key in allowed}
         value = self.input_model.model_validate(arguments)
         return {name: getattr(value, name) for name in self.input_model.model_fields}
 
     def normalize(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return self.input_model.model_validate(arguments).model_dump(mode="json")
+        return self.input_model.model_validate(self.validate(arguments)).model_dump(mode="json")
 
     async def confirmation_prompt(
         self,

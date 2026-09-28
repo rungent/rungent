@@ -35,13 +35,19 @@ async def _noop(ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
     return {"ok": True}
 
 
-def _tool(name: str, domain: str, *, family: str | None = None) -> Tool:
+def _tool(
+    name: str,
+    domain: str,
+    *,
+    family: str | None = None,
+    effect: ToolEffect = ToolEffect.READ,
+) -> Tool:
     return Tool(
         name=name,
         description=f"{name} does {domain}",
         function=_noop,
         input_model=_Empty,
-        effect=ToolEffect.READ,
+        effect=effect,
         approval=ApprovalPolicy.NEVER,
         confirmation=None,
         approval_ready=None,
@@ -110,7 +116,7 @@ async def test_shortlist_act_merges_family_within_max_tools():
     settings = SystemOneSettings(
         base_url="http://systemone.test",
         confidence_threshold=0.5,
-        max_tools=4,
+        max_tools=6,
     )
     client = SystemOneClient(settings)
     client._client = httpx.AsyncClient(
@@ -127,10 +133,11 @@ async def test_shortlist_act_merges_family_within_max_tools():
             _tool("list_zones", "vm"),
             _tool("list_vms", "vm"),
             _tool("get_vm", "vm"),
-            _tool("create_vm_draft", "vm", family="vm_draft"),
-            _tool("prepare_vm_draft", "vm", family="vm_draft"),
-            _tool("commit_vm_draft", "vm", family="vm_draft"),
-            _tool("patch_vm_draft", "vm", family="vm_draft"),
+            _tool("vm_create_options", "vm"),
+            _tool("create_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+            _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+            _tool("commit_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+            _tool("patch_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
         ],
         user_input="创建一台云服务器",
         recent_tool_names=[],
@@ -139,8 +146,9 @@ async def test_shortlist_act_merges_family_within_max_tools():
     assert "create_vm_draft" in result.include
     assert "prepare_vm_draft" in result.include
     assert "commit_vm_draft" in result.include
-    assert "list_zones" not in result.include
-    assert len(result.include) <= 4
+    # Write family shortlist also merges same-domain reads when the budget allows.
+    assert {"list_vms", "get_vm", "vm_create_options"} & result.include
+    assert len(result.include) <= 6
     await client.aclose()
 
 
@@ -208,9 +216,10 @@ async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
     catalog = [
         _tool("list_zones", "vm"),
         _tool("list_vms", "vm"),
-        _tool("create_vm_draft", "vm", family="vm_draft"),
-        _tool("prepare_vm_draft", "vm", family="vm_draft"),
-        _tool("commit_vm_draft", "vm", family="vm_draft"),
+        _tool("get_vm", "vm"),
+        _tool("create_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("commit_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
         _tool("list_elastic", "elastic"),
     ]
     result = await shortlist_tools(
@@ -221,15 +230,63 @@ async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
         previous_include={"create_vm_draft", "prepare_vm_draft"},
     )
     assert result.mode == MODE_STICKY
-    assert result.include == {"create_vm_draft", "prepare_vm_draft"}
+    assert "create_vm_draft" in result.include
+    assert "prepare_vm_draft" in result.include
+    assert {"list_vms", "get_vm", "list_zones"} & result.include
     assert "list_elastic" not in result.include
-    assert len(result.include) < len(catalog)
+    assert len(result.include) <= 3
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sticky_read_winner_escapes_previous_write_family():
+    settings = SystemOneSettings(
+        base_url="http://systemone.test",
+        confidence_threshold=0.6,
+        max_tools=4,
+    )
+    client = SystemOneClient(settings)
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(
+            _one_shot_answers(
+                {
+                    **_high_gate_answers(choice="get_vm", confidence=0.4),
+                    "tool": {
+                        "type": "choice",
+                        "choice": "get_vm",
+                        "confidence": 0.4,
+                        "probabilities": {"get_vm": 0.4, "list_vms": 0.3},
+                    },
+                }
+            )
+        ),
+    )
+    client._owns_client = True
+
+    result = await shortlist_tools(
+        client,
+        tools=[
+            _tool("list_vms", "vm"),
+            _tool("get_vm", "vm"),
+            _tool("create_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+            _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+            _tool("list_elastic", "elastic"),
+        ],
+        user_input="查看这台云服务器详情",
+        recent_tool_names=["create_vm_draft"],
+        previous_include={"create_vm_draft", "prepare_vm_draft"},
+    )
+    assert result.mode == MODE_STICKY
+    assert "get_vm" in result.include
+    assert "list_vms" in result.include
+    assert "create_vm_draft" not in result.include
     await client.aclose()
 
 
 @pytest.mark.asyncio
 async def test_shortlist_transport_failure_sticky_not_full_catalog():
-    settings = SystemOneSettings(base_url="http://systemone.test", max_tools=2)
+    settings = SystemOneSettings(base_url="http://systemone.test", max_tools=3)
     client = SystemOneClient(settings)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -243,8 +300,8 @@ async def test_shortlist_transport_failure_sticky_not_full_catalog():
 
     catalog = [
         _tool("list_vms", "vm"),
-        _tool("create_vm_draft", "vm", family="vm_draft"),
-        _tool("prepare_vm_draft", "vm", family="vm_draft"),
+        _tool("create_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
         _tool("list_elastic", "elastic"),
     ]
     result = await shortlist_tools(
@@ -255,7 +312,9 @@ async def test_shortlist_transport_failure_sticky_not_full_catalog():
         previous_include={"create_vm_draft", "prepare_vm_draft", "commit_vm_draft"},
     )
     assert result.mode == MODE_STICKY
-    assert result.include == {"create_vm_draft", "prepare_vm_draft"}
+    assert "create_vm_draft" in result.include
+    assert "prepare_vm_draft" in result.include
+    assert "list_vms" in result.include
     assert "list_elastic" not in result.include
     await client.aclose()
 
@@ -549,3 +608,70 @@ def test_load_operations_from_config_uses_snapshot_and_overrides(tmp_path: Path)
     assert ops[0].strip_ips is True
     assert ops[0].family == "vm"
     assert "Paginated" in ops[0].summary
+
+
+@pytest.mark.asyncio
+async def test_commit_confirmation_uses_draft_fields_not_api_path():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/vm/create-drafts/d1"
+        return httpx.Response(
+            200,
+            json={
+                "id": "d1",
+                "revision": 3,
+                "confirmation": {
+                    "title": "确认创建云服务器",
+                    "fields": {
+                        "名称": "argos-web",
+                        "规格": "4GPU · 384 GiB",
+                        "系统盘": "100 GiB",
+                    },
+                },
+            },
+        )
+
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    tools = tools_from_operations(
+        [
+            HttpOperation(
+                name="commit_vm_draft",
+                method="POST",
+                path="/api/vm/create-drafts/{draft_id}/commit",
+                summary="Commit draft",
+                domain="vm",
+                family="vm_draft",
+                confirmation="确认创建云服务器？提交后将占用配额并开始开通。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {"type": "string"},
+                        "revision": {"type": "integer"},
+                    },
+                    "required": ["draft_id"],
+                },
+            )
+        ],
+        HttpToolSettings(base_url="http://gw.test", client=async_client),
+    )
+    ctx = ToolContext(
+        identity=Identity(subject_id="u"),
+        session_id="s",
+        run_id="r",
+    )
+    impact = await tools[0].approval_impact(ctx, {"draft_id": "d1", "revision": 3})
+    assert impact is not None
+    assert impact.title == "确认创建云服务器"
+    assert impact.target_label == "argos-web"
+    assert "/api/" not in impact.as_prompt()
+    assert "POST" not in impact.as_prompt()
+    assert any("384 GiB" in change for change in impact.changes)
+    await async_client.aclose()
+
+
+def test_tool_validate_drops_unknown_arguments(caplog: pytest.LogCaptureFixture):
+    tool = _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE)
+    with caplog.at_level("WARNING"):
+        validated = tool.validate({"note": "ok", "zone": "z1", "root_disk_size": 100})
+    assert validated == {"note": "ok"}
+    assert "dropping unknown arguments" in caplog.text

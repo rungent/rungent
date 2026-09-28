@@ -28,8 +28,8 @@ def test_tool_schema_is_inferred_from_signature():
 
 
 def test_tool_rejects_extra_and_invalid_arguments():
-    with pytest.raises(ValidationError):
-        move_place.validate({"name": "Temple", "day": 1, "extra": True})
+    validated = move_place.validate({"name": "Temple", "day": 1, "extra": True})
+    assert validated == {"name": "Temple", "day": 1, "mode": "walking"}
     with pytest.raises(ValidationError):
         move_place.validate({"name": "Temple", "day": 1, "mode": "flying"})
 

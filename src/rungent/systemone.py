@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .tools import Tool
+from .tools import Tool, ToolEffect
 
 logger = logging.getLogger(__name__)
 
@@ -187,12 +187,16 @@ def _expand_act_include(
         for tool in tools
         if tool.name not in ordered and (tool.domain or "general") == domain
     ]
+    reads = [tool for tool in siblings if tool.effect == ToolEffect.READ]
+    others = [tool for tool in siblings if tool.effect != ToolEffect.READ]
 
     def _affinity(tool: Tool) -> tuple[int, int]:
         shared = len(winner_tokens & set(tool.name.split("_")))
         return (-shared, siblings.index(tool))
 
-    for tool in sorted(siblings, key=_affinity):
+    # 读意图：只并入同 domain 只读，避免写家族粘住。
+    expand = reads if winner_tool.effect == ToolEffect.READ else reads + others
+    for tool in sorted(expand, key=_affinity):
         if len(ordered) >= max_tools:
             break
         ordered.append(tool.name)
@@ -207,10 +211,28 @@ def _sticky_include(
     winner: str | None,
     max_tools: int,
 ) -> set[str]:
+    by_name = {tool.name: tool for tool in tools}
+
+    # 读意图赢家走 act expand，不被上一轮写家族 previous 锁死。
+    if winner:
+        winner_tool = by_name.get(winner)
+        if winner_tool is not None and winner_tool.effect == ToolEffect.READ:
+            return _expand_act_include(tools, winner=winner, max_tools=max_tools)
+
     if previous:
-        alive = {name for name in previous if any(tool.name == name for tool in tools)}
+        alive = {name for name in previous if name in by_name}
         if alive:
-            return _cap_names(sorted(alive), limit=max_tools)
+            ordered = sorted(alive)
+            domains = {(by_name[name].domain or "general") for name in ordered}
+            # 写家族短名单并入同 domain 只读工具。
+            for tool in tools:
+                if (
+                    tool.name not in ordered
+                    and (tool.domain or "general") in domains
+                    and tool.effect == ToolEffect.READ
+                ):
+                    ordered.append(tool.name)
+            return _cap_names(ordered, limit=max_tools)
 
     seeds = list(recent_tool_names)
     if winner:
@@ -221,16 +243,24 @@ def _sticky_include(
         for tool in tools:
             if tool.name in family and tool.name not in ordered:
                 ordered.append(tool.name)
+        domains = {
+            (by_name[name].domain or "general") for name in ordered if name in by_name
+        }
+        for tool in tools:
+            if (
+                tool.name not in ordered
+                and (tool.domain or "general") in domains
+                and tool.effect == ToolEffect.READ
+            ):
+                ordered.append(tool.name)
         return _cap_names(ordered, limit=max_tools)
 
     if winner:
-        by_name = {tool.name: tool for tool in tools}
         tool = by_name.get(winner)
         if tool is not None:
             return _domain_cap(tools, domain=tool.domain or "general", limit=max_tools)
 
     for name in reversed(recent_tool_names):
-        by_name = {tool.name: tool for tool in tools}
         tool = by_name.get(name)
         if tool is not None:
             return _domain_cap(tools, domain=tool.domain or "general", limit=max_tools)
