@@ -11,7 +11,10 @@ from rungent import ToolContext, create_openapi_agent
 from rungent.http_tools import (
     HttpOperation,
     HttpToolSettings,
+    OpenApiHost,
     load_operations_from_config,
+    load_operations_from_hosts,
+    operations_from_openapi,
     tools_from_operations,
 )
 from rungent.state import Identity
@@ -554,16 +557,61 @@ def test_create_openapi_agent_builds_tools():
     assert [tool.name for tool in agent.tools] == ["list_vms"]
 
 
-def test_load_operations_from_config_uses_snapshot_and_overrides(tmp_path: Path):
+def test_load_operations_from_hosts_uses_base_url_and_spec():
+    ops = load_operations_from_hosts(
+        [
+            OpenApiHost(
+                id="cs",
+                path_prefix="/api",
+                spec={
+                    "paths": {
+                        "/vm": {
+                            "get": {
+                                "operationId": "list_vms",
+                                "summary": "List VMs",
+                                "x-aidy": {"domain": "vm", "strip_ips": True},
+                            }
+                        }
+                    }
+                },
+            ),
+            {
+                "id": "gateway",
+                "spec": {
+                    "paths": {
+                        "/api/user/me": {
+                            "get": {
+                                "operationId": "get_me",
+                                "summary": "Me",
+                                "x-aidy": {"domain": "account", "name": "get_user"},
+                            }
+                        }
+                    }
+                },
+            },
+        ]
+    )
+    assert {op.name for op in ops} == {"list_vms", "get_user"}
+    assert ops[0].path == "/api/vm"
+    assert OpenApiHost(id="cs", base_url="http://tm-cs:8000").resolved_openapi_url() == (
+        "http://tm-cs:8000/openapi.json"
+    )
+
+
+def test_load_operations_from_config_uses_x_aidy_metadata(tmp_path: Path):
     snapshot = {
         "openapi": "3.1.0",
         "paths": {
             "/vm": {
                 "get": {
-                    "operationId": "list_vms_openapi",
+                    "operationId": "list_vms",
                     "summary": "List virtual machines",
                     "description": "Paginated VM inventory",
-                    "tags": ["虚拟机"],
+                    "x-aidy": {
+                        "domain": "vm",
+                        "family": "vm",
+                        "strip_ips": True,
+                    },
                     "parameters": [
                         {
                             "name": "page",
@@ -575,8 +623,7 @@ def test_load_operations_from_config_uses_snapshot_and_overrides(tmp_path: Path)
             }
         },
     }
-    snapshot_path = tmp_path / "cs.json"
-    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    (tmp_path / "cs.json").write_text(json.dumps(snapshot), encoding="utf-8")
     config_path = tmp_path / "tools.json"
     config_path.write_text(
         json.dumps(
@@ -588,15 +635,6 @@ def test_load_operations_from_config_uses_snapshot_and_overrides(tmp_path: Path)
                         "path_prefix": "/api",
                     }
                 ],
-                "include": [["GET", "/vm"]],
-                "overrides": {
-                    "GET /api/vm": {
-                        "name": "list_vms",
-                        "domain": "vm",
-                        "family": "vm",
-                        "strip_ips": True,
-                    }
-                },
             }
         ),
         encoding="utf-8",
@@ -607,7 +645,69 @@ def test_load_operations_from_config_uses_snapshot_and_overrides(tmp_path: Path)
     assert ops[0].path == "/api/vm"
     assert ops[0].strip_ips is True
     assert ops[0].family == "vm"
+    assert ops[0].domain == "vm"
     assert "Paginated" in ops[0].summary
+
+
+def test_operations_from_openapi_reads_x_aidy_metadata():
+    openapi = {
+        "paths": {
+            "/nodes/{node_id}/reboot": {
+                "post": {
+                    "operationId": "reboot_node",
+                    "summary": "Reboot node",
+                    "x-aidy": {
+                        "domain": "baremetal",
+                        "family": "node",
+                        "approval": "always",
+                        "effect": "write",
+                        "confirmation": {
+                            "kind": "confirm",
+                            "title": "Confirm reboot",
+                            "fields": [
+                                {"key": "node_id", "label": "Node"},
+                                {"key": "reason", "label": "Reason", "source": "args"},
+                            ],
+                        },
+                    },
+                    "parameters": [
+                        {
+                            "name": "node_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                }
+            }
+        }
+    }
+    ops = operations_from_openapi(openapi, path_prefix="/api")
+    assert len(ops) == 1
+    op = ops[0]
+    assert op.name == "reboot_node"
+    assert op.approval == "always"
+    assert op.effect == "write"
+    assert op.confirmation is not None
+    assert op.confirmation["title"] == "Confirm reboot"
+    assert op.confirmation["fields"][0]["key"] == "node_id"
+
+
+def test_operations_from_openapi_require_aidy_flag_filters():
+    openapi = {
+        "paths": {
+            "/hidden": {"get": {"operationId": "hidden", "summary": "Nope"}},
+            "/visible": {
+                "get": {
+                    "operationId": "visible",
+                    "summary": "Yes",
+                    "x-aidy": True,
+                }
+            },
+        }
+    }
+    ops = operations_from_openapi(openapi, require_aidy_flag=True)
+    assert [op.name for op in ops] == ["visible"]
 
 
 @pytest.mark.asyncio

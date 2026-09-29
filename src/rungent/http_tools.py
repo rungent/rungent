@@ -66,7 +66,7 @@ class HttpOperation:
     parameters: dict[str, Any] = field(default_factory=dict)
     effect: str | None = None
     approval: str | None = None
-    confirmation: str | None = None
+    confirmation: str | Mapping[str, Any] | None = None
     timeout_seconds: float = 120.0
     strip_ips: bool = False
     # When set (e.g. "inputs"), wrap a flat JSON object as {inputs: ...} if the key is absent.
@@ -316,7 +316,7 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
                 target = str(fields.get("名称") or arguments.get("draft_id") or title)
                 changes = [f"{key}：{value}" for key, value in fields.items()]
                 effect_text = "提交后将占用配额并开始开通"
-                if operation.confirmation:
+                if isinstance(operation.confirmation, str) and operation.confirmation:
                     effect_text = (
                         operation.confirmation.format_map(_FormatMap(arguments)).strip()
                         or effect_text
@@ -328,12 +328,44 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
                     changes=changes,
                 )
 
-        if operation.confirmation:
+        if isinstance(operation.confirmation, Mapping):
+            conf = dict(operation.confirmation)
+            title = str(conf.get("title") or operation.summary or operation.name)
+            title = title.format_map(_FormatMap(arguments)).strip() or title
+            fields_spec = conf.get("fields") or []
+            changes: list[str] = []
+            target = title
+            if isinstance(fields_spec, list):
+                for item in fields_spec:
+                    if not isinstance(item, Mapping):
+                        continue
+                    key = str(item.get("key") or "")
+                    label = str(item.get("label") or key)
+                    source = str(item.get("source") or "args")
+                    value = arguments.get(key) if source == "args" else None
+                    if value is None and key in arguments:
+                        value = arguments[key]
+                    if value is not None:
+                        changes.append(f"{label}：{value}")
+                        if target == title:
+                            target = str(value)
+            effect = str(conf.get("effect") or title)
+            return ApprovalImpact(
+                title=title,
+                target_label=str(target),
+                effect=effect,
+                changes=changes,
+            )
+
+        if isinstance(operation.confirmation, str) and operation.confirmation:
             title = operation.confirmation.format_map(_FormatMap(arguments)).strip()
             if not title:
                 title = operation.summary or operation.name
             target = str(
                 arguments.get("id")
+                or arguments.get("vm_id")
+                or arguments.get("system_id")
+                or arguments.get("elastic_id")
                 or arguments.get("draft_id")
                 or arguments.get("name")
                 or title
@@ -343,6 +375,9 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
         title = operation.summary or operation.name
         target = str(
             arguments.get("id")
+            or arguments.get("vm_id")
+            or arguments.get("system_id")
+            or arguments.get("elastic_id")
             or arguments.get("draft_id")
             or arguments.get("name")
             or title
@@ -531,9 +566,10 @@ def operations_from_openapi(
     """Convert OpenAPI paths into HttpOperation entries.
 
     allowlist entries are (METHOD, path) with OpenAPI path templates.
-    When require_aidy_flag is true, only operations with ``x-aidy: true`` / ``aidy: true`` are kept.
-    OpenAPI extensions ``x-aidy-domain``, ``x-aidy-family``, ``x-aidy-wrap-body``,
-    ``x-aidy-strip-ips`` are mapped onto HttpOperation when present.
+    When require_aidy_flag is true, only operations with ``x-aidy: true`` or an
+    ``x-aidy`` object (or ``aidy``) are kept. Prefer a single ``x-aidy`` object
+    on the owning service for domain/family/approval/confirmation/effect/
+    strip_ips/wrap_body; flat ``x-aidy-*`` keys are still read as a fallback.
     """
     allowed = {(method.upper(), path) for method, path in allowlist} if allowlist else None
     paths = spec.get("paths") or {}
@@ -557,11 +593,19 @@ def operations_from_openapi(
                 if not allowed_hit:
                     continue
             extra = operation.get("x-aidy") or operation.get("aidy")
-            if require_aidy_flag and extra is not True:
-                continue
+            if require_aidy_flag:
+                if extra is True:
+                    meta: Mapping[str, Any] = {}
+                elif isinstance(extra, Mapping):
+                    meta = extra
+                else:
+                    continue
+            else:
+                meta = extra if isinstance(extra, Mapping) else {}
             tags = operation.get("tags") or []
             domain = str(
                 operation.get("x-aidy-domain")
+                or meta.get("domain")
                 or (str(tags[0]).lower().replace(" ", "_") if tags else "general")
             )
             name = str(
@@ -617,9 +661,25 @@ def operations_from_openapi(
                     # Prefer flattened fields; body remains optional unless no properties.
                     if len(properties) == 1:
                         required.append("body")
-            family = operation.get("x-aidy-family")
-            wrap_body = operation.get("x-aidy-wrap-body")
-            strip_ips = bool(operation.get("x-aidy-strip-ips") or False)
+            family = operation.get("x-aidy-family") or meta.get("family")
+            wrap_body = operation.get("x-aidy-wrap-body") or meta.get("wrap_body")
+            strip_ips = bool(
+                operation.get("x-aidy-strip-ips")
+                or meta.get("strip_ips")
+                or False
+            )
+            approval = operation.get("x-aidy-approval") or meta.get("approval")
+            confirmation = operation.get("x-aidy-confirmation") or meta.get("confirmation")
+            effect = operation.get("x-aidy-effect") or meta.get("effect")
+            name_override = meta.get("name")
+            if name_override:
+                name = re.sub(r"[^a-zA-Z0-9_]", "_", str(name_override))
+            if isinstance(confirmation, Mapping):
+                confirmation_value: str | Mapping[str, Any] | None = dict(confirmation)
+            elif confirmation:
+                confirmation_value = str(confirmation)
+            else:
+                confirmation_value = None
             operations.append(
                 HttpOperation(
                     name=name,
@@ -631,6 +691,9 @@ def operations_from_openapi(
                     strip_ips=strip_ips,
                     wrap_body=str(wrap_body) if wrap_body else None,
                     family=str(family) if family else None,
+                    approval=str(approval) if approval else None,
+                    confirmation=confirmation_value,
+                    effect=str(effect) if effect else None,
                 )
             )
     return operations
@@ -661,6 +724,93 @@ def _resolve_openapi_url(template: str, env: Mapping[str, str] | None = None) ->
     if not expanded or "://" not in expanded:
         return ""
     return expanded
+
+
+@dataclass(frozen=True, slots=True)
+class OpenApiHost:
+    """One upstream service whose OpenAPI feeds the HTTP tool catalog.
+
+    Prefer ``base_url`` (service root); rungent appends ``openapi_path``.
+    Use ``spec`` for in-proc documents (e.g. the host's own ``app.openapi()``).
+    ``openapi_url`` overrides ``base_url`` when set.
+    """
+
+    id: str
+    base_url: str | None = None
+    openapi_url: str | None = None
+    openapi_path: str = "/openapi.json"
+    path_prefix: str = ""
+    spec: Mapping[str, Any] | None = None
+
+    def resolved_openapi_url(self, env: Mapping[str, str] | None = None) -> str:
+        if self.openapi_url:
+            return _resolve_openapi_url(self.openapi_url, env)
+        if not self.base_url:
+            return ""
+        base = _expand_env(self.base_url, env).strip().rstrip("/")
+        if not base or "://" not in base:
+            return ""
+        path = self.openapi_path if self.openapi_path.startswith("/") else f"/{self.openapi_path}"
+        return f"{base}{path}"
+
+
+def _coerce_openapi_host(value: OpenApiHost | Mapping[str, Any]) -> OpenApiHost:
+    if isinstance(value, OpenApiHost):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError(f"OpenAPI host must be OpenApiHost or mapping, got {type(value)!r}")
+    data = dict(value)
+    if "id" not in data:
+        raise ValueError("OpenAPI host requires id")
+    allowed = {
+        "id",
+        "base_url",
+        "openapi_url",
+        "openapi_path",
+        "path_prefix",
+        "spec",
+    }
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValueError(f"Unknown OpenApiHost fields: {sorted(unknown)}")
+    return OpenApiHost(**data)  # type: ignore[arg-type]
+
+
+def load_operations_from_hosts(
+    hosts: Sequence[OpenApiHost | Mapping[str, Any]],
+    *,
+    require_aidy_flag: bool = True,
+    env: Mapping[str, str] | None = None,
+    specs: Mapping[str, Mapping[str, Any]] | None = None,
+    timeout_seconds: float = 15.0,
+) -> list[HttpOperation]:
+    """Load x-aidy tools from service hosts (base URL or in-proc spec).
+
+    Hosts pass service roots; this resolves ``{base_url}{openapi_path}`` and
+    fetches live OpenAPI. Pass ``spec=`` (or ``specs[id]``) to skip the network.
+    """
+    merged_specs: dict[str, Mapping[str, Any]] = dict(specs or {})
+    sources: list[dict[str, Any]] = []
+    for raw in hosts:
+        host = _coerce_openapi_host(raw)
+        if host.spec is not None:
+            merged_specs[host.id] = host.spec
+        entry: dict[str, Any] = {"id": host.id, "path_prefix": host.path_prefix}
+        if host.id not in merged_specs:
+            url = host.resolved_openapi_url(env)
+            if not url:
+                raise ValueError(
+                    f"OpenAPI host {host.id!r} needs base_url, openapi_url, or spec"
+                )
+            entry["openapi_url"] = url
+        sources.append(entry)
+    return load_operations_from_sources(
+        sources,
+        require_aidy_flag=require_aidy_flag,
+        env=env,
+        specs=merged_specs or None,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _normalize_template(path: str) -> str:
@@ -760,6 +910,63 @@ def _read_openapi_file(path: Path) -> dict[str, Any]:
     return dict(payload)
 
 
+def load_operations_from_sources(
+    sources: Sequence[Mapping[str, Any]],
+    *,
+    require_aidy_flag: bool = True,
+    include: Sequence[tuple[str, str]] | None = None,
+    overrides: Mapping[str, Mapping[str, Any]] | None = None,
+    static_operations: Sequence[Mapping[str, Any] | HttpOperation] | None = None,
+    env: Mapping[str, str] | None = None,
+    specs: Mapping[str, Mapping[str, Any]] | None = None,
+    timeout_seconds: float = 15.0,
+) -> list[HttpOperation]:
+    """Load HTTP tools from live OpenAPI sources (no snapshot fallback).
+
+    When ``require_aidy_flag`` is true (default), only operations marked
+    ``x-aidy: true`` (or an object) are kept. Prefer putting tool metadata on
+    the owning service's OpenAPI instead of a host-side include list.
+    """
+    payload: dict[str, Any] = {
+        "sources": list(sources),
+        "require_aidy_flag": require_aidy_flag,
+    }
+    if include is not None:
+        payload["include"] = [list(item) for item in include]
+    if overrides is not None:
+        payload["overrides"] = dict(overrides)
+    if static_operations:
+        payload["static_operations"] = [
+            item
+            if isinstance(item, Mapping)
+            else {
+                "name": item.name,
+                "method": item.method,
+                "path": item.path,
+                "summary": item.summary,
+                "domain": item.domain,
+                "parameters": item.parameters,
+                "effect": item.effect,
+                "approval": item.approval,
+                "confirmation": item.confirmation,
+                "timeout_seconds": item.timeout_seconds,
+                "strip_ips": item.strip_ips,
+                "wrap_body": item.wrap_body,
+                "family": item.family,
+            }
+            for item in static_operations
+        ]
+    # Write through load_operations_from_config via an in-memory path by
+    # reusing the same parsing body — call internal by temp config file avoided.
+    return _load_operations_payload(
+        payload,
+        config_dir=Path("."),
+        env=env,
+        specs=specs,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def load_operations_from_config(
     path: str | Path,
     *,
@@ -775,19 +982,16 @@ def load_operations_from_config(
           "sources": [
             {
               "id": "cs",
-              "openapi_url": "${GATEWAY_CS_URL}/openapi.json",
-              "openapi_file": "openapi-cs.snapshot.json",
+              "openapi_url": "${AIDY_CS_OPENAPI_URL}",
               "path_prefix": "/api"
             }
           ],
-          "include": [["GET", "/vm"], ["GET", "/api/user/me"]],
-          "overrides": {"GET /api/vm": {"name": "list_vms", "family": "vm"}},
-          "static_operations": []
+          "require_aidy_flag": true
         }
 
-    For each source: use ``specs[id]`` if provided; else HTTP ``openapi_url`` when it
-    expands to a full URL; else ``openapi_file`` relative to the config directory.
-    Live URL fetch failures raise (no silent empty catalog).
+    For each source: use ``specs[id]`` if provided; else HTTP ``openapi_url``;
+    else ``openapi_file`` relative to the config directory (tests / offline only).
+    Live URL fetch failures raise — no snapshot fallback.
     """
     config_path = Path(path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -798,6 +1002,23 @@ def load_operations_from_config(
     if "operations" in payload and "sources" not in payload:
         return load_operations(payload)
 
+    return _load_operations_payload(
+        dict(payload),
+        config_dir=config_path.parent,
+        env=env,
+        specs=specs,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _load_operations_payload(
+    payload: Mapping[str, Any],
+    *,
+    config_dir: Path,
+    env: Mapping[str, str] | None = None,
+    specs: Mapping[str, Mapping[str, Any]] | None = None,
+    timeout_seconds: float = 15.0,
+) -> list[HttpOperation]:
     include_raw = payload.get("include") or []
     include: list[tuple[str, str]] | None = None
     if include_raw:
@@ -810,7 +1031,11 @@ def load_operations_from_config(
             else:
                 raise ValueError(f"Invalid include entry: {item!r}")
 
-    require_aidy_flag = bool(payload.get("require_aidy_flag") or False)
+    # Default on for source-based configs: catalog = x-aidy on owning OpenAPI.
+    if "require_aidy_flag" in payload:
+        require_aidy_flag = bool(payload["require_aidy_flag"])
+    else:
+        require_aidy_flag = bool(payload.get("sources"))
     operations: list[HttpOperation] = []
     seen: set[tuple[str, str]] = set()
 
@@ -832,22 +1057,12 @@ def load_operations_from_config(
             if file_name:
                 file_path = Path(file_name)
                 if not file_path.is_absolute():
-                    file_path = config_path.parent / file_path
+                    file_path = config_dir / file_path
             if url:
                 try:
                     spec = _fetch_openapi_spec(url, timeout_seconds=timeout_seconds)
                 except Exception as exc:
-                    if file_path is not None and file_path.is_file():
-                        logger = __import__("logging").getLogger(__name__)
-                        logger.warning(
-                            "OpenAPI fetch failed for %s (%s); using snapshot %s",
-                            url,
-                            exc,
-                            file_path,
-                        )
-                        spec = _read_openapi_file(file_path)
-                    else:
-                        raise RuntimeError(f"Failed to fetch OpenAPI from {url}: {exc}") from exc
+                    raise RuntimeError(f"Failed to fetch OpenAPI from {url}: {exc}") from exc
             else:
                 if file_path is None:
                     raise ValueError(
@@ -889,8 +1104,10 @@ def load_operations_from_config(
         ]
 
     if not operations:
-        raise ValueError(f"No HTTP operations loaded from {config_path}")
+        raise ValueError("No HTTP operations loaded from OpenAPI sources")
     names = [op.name for op in operations]
     if len(names) != len(set(names)):
         raise ValueError(f"Duplicate HTTP tool names after OpenAPI load: {names}")
     return operations
+
+

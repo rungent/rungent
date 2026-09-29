@@ -3,11 +3,17 @@ from .execution import ResourceRef, ToolExecution
 from .http_tools import (
     HttpOperation,
     HttpToolSettings,
-    load_operations_from_config,
+    OpenApiHost,
+    load_operations_from_hosts,
+    load_operations_from_sources,
     operations_from_openapi,
     tools_from_operations,
 )
-from .presets import create_openapi_agent, create_openapi_runtime, load_allowlist_file
+from .presets import (
+    create_openapi_agent,
+    create_openapi_runtime,
+    replace_openapi_tools,
+)
 from .runtime import Runtime
 from .state import (
     ApprovalImpact,
@@ -32,6 +38,7 @@ __all__ = [
     "Identity",
     "InteractionRequest",
     "InteractionResponse",
+    "OpenApiHost",
     "ResourceRef",
     "Runtime",
     "RunActivity",
@@ -46,9 +53,10 @@ __all__ = [
     "TrustedInteractionResponse",
     "create_openapi_agent",
     "create_openapi_runtime",
-    "load_allowlist_file",
-    "load_operations_from_config",
+    "load_operations_from_hosts",
+    "load_operations_from_sources",
     "operations_from_openapi",
+    "replace_openapi_tools",
     "tool",
     "tools_from_operations",
 ]

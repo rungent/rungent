@@ -6,18 +6,24 @@ description: Agents, typed tools, model adapters, runtime context, and results.
 ## OpenAPI / HTTP preset
 
 ```python
-from rungent import SystemOneSettings, create_openapi_runtime
+from rungent import OpenApiHost, SystemOneSettings, create_openapi_runtime, replace_openapi_tools
 from rungent.http_tools import HttpToolSettings
-from rungent.presets import load_allowlist_file
 
 runtime = create_openapi_runtime(
     name="console",
     instructions="...",
     model=model,
     store=store,
-    operations=load_allowlist_file("allowlist.json"),
     http=HttpToolSettings(base_url=internal_base_url),
     systemone=SystemOneSettings.from_env(),
+)
+replace_openapi_tools(
+    runtime,
+    http=HttpToolSettings(base_url=internal_base_url),
+    hosts=[
+        OpenApiHost(id="cs", base_url=cs_url, path_prefix="/api"),
+        OpenApiHost(id="gateway", spec=app.openapi()),
+    ],
 )
 ```
 

@@ -1,22 +1,36 @@
-# HTTP tools from OpenAPI / allowlist
+# HTTP tools from OpenAPI hosts
 
 Hosts that want “same APIs as the console” should not hand-write `@tool` wrappers.
-Build tools from an allowlist (or OpenAPI) and let System One shortlist each step
+Point rungent at service **hosts**; it fetches `{base_url}/openapi.json`, keeps
+operations marked `x-aidy`, and lets System One shortlist each step
 (`chat` / `act` / `sticky` — see [System One](/docs/systemone)).
 
 ```python
-from rungent import HttpToolSettings, create_openapi_runtime, load_allowlist_file
+from rungent import HttpToolSettings, OpenApiHost, create_openapi_runtime, replace_openapi_tools
 
 runtime = create_openapi_runtime(
     name="aidy",
     instructions="...",
     model=model,
     store=store,
-    operations=load_allowlist_file("allowlist.json"),
     http=HttpToolSettings(base_url=internal_gateway_url),
     systemone=SystemOneSettings.from_env(),
 )
+
+# After the host app is built (e.g. FastAPI lifespan):
+replace_openapi_tools(
+    runtime,
+    http=HttpToolSettings(base_url=internal_gateway_url),
+    hosts=[
+        OpenApiHost(id="cs", base_url=cs_url, path_prefix="/api"),
+        OpenApiHost(id="maas", base_url=maas_url, path_prefix="/api"),
+        OpenApiHost(id="gateway", spec=app.openapi()),
+    ],
+)
 ```
+
+Host code only supplies service roots (and optional in-proc `spec=`). Catalog metadata
+lives on each owning service as `openapi_extra={"x-aidy": {...}}`.
 
 ## Defaults
 

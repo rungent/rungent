@@ -71,9 +71,10 @@ Logs each step: `mode`, `noul`, `choice`, `confidence`, `include_size`.
 
 ## OpenAPI tool source
 
-Prefer a thin host config (`sources` + `include` + `overrides`) loaded with
-`load_operations_from_config` / `load_allowlist_file`. Specs come from in-cluster OpenAPI URLs
-(or snapshot files for offline tests). Tool **execution** still uses the host loopback base URL.
+Hosts pass service roots via `OpenApiHost` / `load_operations_from_hosts` /
+`replace_openapi_tools`. Rungent resolves `{base_url}/openapi.json` (or uses
+in-proc `spec=`). Catalog = operations marked `x-aidy`. Tool **execution** still
+uses the host loopback base URL.
 
 ## Diagrams
 
