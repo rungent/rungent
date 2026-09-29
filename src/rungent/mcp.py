@@ -101,22 +101,32 @@ def _jsonrpc_result(rpc_id: Any, result: Any) -> dict[str, Any]:
 
 
 def create_mcp_asgi(
-    agent: Agent,
+    agent: Agent | Callable[[], Agent],
     *,
     identity_resolver: IdentityResolver,
     context_factory: ContextFactory | None = None,
-    tools: Sequence[Tool] | None = None,
+    tools: Sequence[Tool] | Callable[[], Sequence[Tool]] | None = None,
     server_name: str | None = None,
     server_version: str = "1.0.0",
     protocol_version: str = "2025-03-26",
     resource_metadata_url: ResourceMetadataUrl | None = None,
 ):
-    """Return a FastAPI router that serves MCP JSON-RPC on POST ``/`` (mount at ``/mcp``)."""
+    """Return a FastAPI router that serves MCP JSON-RPC on POST ``/`` (mount at ``/mcp``).
+
+    ``agent`` / ``tools`` may be callables so hosts that load OpenAPI tools in
+    lifespan still expose the live catalog (not a freeze at import time).
+    """
     from fastapi import APIRouter, Request
     from fastapi.responses import JSONResponse, Response
 
-    selected = exportable_tools(agent.tools if tools is None else tools)
-    catalog = {item.name: item for item in selected}
+    def resolve_agent() -> Agent:
+        return agent() if callable(agent) else agent
+
+    def resolve_tools() -> list[Tool]:
+        current = resolve_agent()
+        raw = tools() if callable(tools) else tools
+        return exportable_tools(current.tools if raw is None else raw)
+
     router = APIRouter()
 
     def metadata_url(request: Request) -> str | None:
@@ -130,7 +140,9 @@ def create_mcp_asgi(
         headers: dict[str, str] = {"Access-Control-Allow-Origin": "*"}
         url = metadata_url(request)
         if url:
-            headers["WWW-Authenticate"] = f'Bearer realm="{agent.name}", resource_metadata="{url}"'
+            headers["WWW-Authenticate"] = (
+                f'Bearer realm="{resolve_agent().name}", resource_metadata="{url}"'
+            )
         return JSONResponse({"error": "unauthorized"}, status_code=401, headers=headers)
 
     async def identity(request: Request) -> Identity:
@@ -146,6 +158,9 @@ def create_mcp_asgi(
         method = body.get("method")
         raw_params = body.get("params")
         params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+        current_agent = resolve_agent()
+        selected = resolve_tools()
+        catalog = {item.name: item for item in selected}
         if method == "initialize":
             return _jsonrpc_result(
                 rpc_id,
@@ -153,7 +168,7 @@ def create_mcp_asgi(
                     "protocolVersion": protocol_version,
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {
-                        "name": server_name or agent.name,
+                        "name": server_name or current_agent.name,
                         "version": server_version,
                     },
                 },
