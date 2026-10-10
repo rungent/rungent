@@ -43,8 +43,11 @@ gate = max(needs_tool, acts_on_resources, 1 - prose_suffices)
 
 Builtins (`request_input`, `report_progress`) are always attached by `Agent.tool_schemas`.
 
-**Expand (deterministic):** optional `Tool.family` / `HttpOperation.family` groups draft-style
-workflows; otherwise same `domain` plus shared name tokens. Hosts set family as **data** on tools.
+**Expand (deterministic):**
+
+- `family` is one user workflow and is atomic. Picking any member includes the whole family, including writes, even when the winner is a read (the catalog step of that workflow). A catalog GET that starts the workflow must carry the same `family`. One family must not mix inventory lists with delete or power actions.
+- `domain` only adds same-area neighbors. A read winner adds other reads. A write winner may also add other writes in that domain, ranked by shared name tokens.
+- Hosts set `family` and `domain` as data on tools (`x-aidy`). Rungent does not special-case product sentences.
 
 ## Configure
 

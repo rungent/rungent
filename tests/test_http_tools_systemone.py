@@ -156,6 +156,67 @@ async def test_shortlist_act_merges_family_within_max_tools():
 
 
 @pytest.mark.asyncio
+async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
+    settings = SystemOneSettings(base_url="http://systemone.test", max_tools=8)
+    client = SystemOneClient(settings)
+    tools = [
+        _tool("list_vms", "vm"),
+        _tool("get_vm", "vm"),
+        _tool("vm_create_options", "vm", family="vm_draft"),
+        _tool("create_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("commit_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("start_vm", "vm", effect=ToolEffect.WRITE),
+        _tool("delete_vm", "vm", effect=ToolEffect.DESTRUCTIVE),
+    ]
+
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(
+            _one_shot_answers(_high_gate_answers(choice="vm_create_options"))
+        ),
+    )
+    client._owns_client = True
+    catalog = await shortlist_tools(
+        client,
+        tools=tools,
+        user_input="先列出可选规格，不要下单",
+        recent_tool_names=[],
+    )
+    assert catalog.mode == MODE_ACT
+    for name in ("vm_create_options", "create_vm_draft", "prepare_vm_draft", "commit_vm_draft"):
+        assert name in catalog.include
+    assert "start_vm" not in catalog.include
+    assert "delete_vm" not in catalog.include
+    await client.aclose()
+
+    client = SystemOneClient(settings)
+    client._client = httpx.AsyncClient(
+        base_url=settings.base_url,
+        transport=httpx.MockTransport(
+            _one_shot_answers(_high_gate_answers(choice="list_vms"))
+        ),
+    )
+    client._owns_client = True
+    listed = await shortlist_tools(
+        client,
+        tools=tools,
+        user_input="列出云服务器",
+        recent_tool_names=[],
+    )
+    assert "list_vms" in listed.include
+    for name in (
+        "create_vm_draft",
+        "prepare_vm_draft",
+        "commit_vm_draft",
+        "start_vm",
+        "delete_vm",
+    ):
+        assert name not in listed.include
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_shortlist_low_noul_is_chat_empty_include():
     settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.6)
     client = SystemOneClient(settings)
