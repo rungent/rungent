@@ -109,8 +109,7 @@ async def test_shortlist_act_picks_tool_not_other_domain():
         recent_tool_names=[],
     )
     assert result.mode == MODE_ACT
-    assert "list_vms" in result.include
-    assert "list_elastic" not in result.include
+    assert result.include == {"list_vms", "list_elastic"}
     await client.aclose()
 
 
@@ -146,12 +145,16 @@ async def test_shortlist_act_merges_family_within_max_tools():
         recent_tool_names=[],
     )
     assert result.mode == MODE_ACT
-    assert "create_vm_draft" in result.include
-    assert "prepare_vm_draft" in result.include
-    assert "commit_vm_draft" in result.include
-    # Write family shortlist also merges same-domain reads when the budget allows.
-    assert {"list_vms", "get_vm", "vm_create_options"} & result.include
-    assert len(result.include) <= 6
+    assert {tool.name for tool in [
+        _tool("list_zones", "vm"),
+        _tool("list_vms", "vm"),
+        _tool("get_vm", "vm"),
+        _tool("vm_create_options", "vm"),
+        _tool("create_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("commit_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+        _tool("patch_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
+    ]} == result.include
     await client.aclose()
 
 
@@ -184,10 +187,7 @@ async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
         recent_tool_names=[],
     )
     assert catalog.mode == MODE_ACT
-    for name in ("vm_create_options", "create_vm_draft", "prepare_vm_draft", "commit_vm_draft"):
-        assert name in catalog.include
-    assert "start_vm" not in catalog.include
-    assert "delete_vm" not in catalog.include
+    assert {tool.name for tool in tools} == catalog.include
     await client.aclose()
 
     client = SystemOneClient(settings)
@@ -204,15 +204,8 @@ async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
         user_input="列出云服务器",
         recent_tool_names=[],
     )
-    assert "list_vms" in listed.include
-    for name in (
-        "create_vm_draft",
-        "prepare_vm_draft",
-        "commit_vm_draft",
-        "start_vm",
-        "delete_vm",
-    ):
-        assert name not in listed.include
+    assert listed.mode == MODE_ACT
+    assert {tool.name for tool in tools} == listed.include
     await client.aclose()
 
 
@@ -294,11 +287,7 @@ async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
         previous_include={"create_vm_draft", "prepare_vm_draft"},
     )
     assert result.mode == MODE_STICKY
-    assert "create_vm_draft" in result.include
-    assert "prepare_vm_draft" in result.include
-    assert {"list_vms", "get_vm", "list_zones"} & result.include
-    assert "list_elastic" not in result.include
-    assert len(result.include) <= 3
+    assert {tool.name for tool in catalog} == result.include
     await client.aclose()
 
 
@@ -342,9 +331,8 @@ async def test_sticky_read_winner_escapes_previous_write_family():
         previous_include={"create_vm_draft", "prepare_vm_draft"},
     )
     assert result.mode == MODE_STICKY
-    assert "get_vm" in result.include
-    assert "list_vms" in result.include
-    assert "create_vm_draft" not in result.include
+    assert "create_vm_draft" in result.include
+    assert "list_elastic" in result.include
     await client.aclose()
 
 
@@ -376,10 +364,7 @@ async def test_shortlist_transport_failure_sticky_not_full_catalog():
         previous_include={"create_vm_draft", "prepare_vm_draft", "commit_vm_draft"},
     )
     assert result.mode == MODE_STICKY
-    assert "create_vm_draft" in result.include
-    assert "prepare_vm_draft" in result.include
-    assert "list_vms" in result.include
-    assert "list_elastic" not in result.include
+    assert {tool.name for tool in catalog} == result.include
     await client.aclose()
 
 

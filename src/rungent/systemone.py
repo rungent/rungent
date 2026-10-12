@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from .tools import Tool, ToolEffect
+from .tools import Tool
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,11 @@ class SystemOneSettings:
 
 @dataclass(frozen=True, slots=True)
 class ShortlistResult:
-    """Harness shortlist for one model step. Never means 'full catalog'."""
+    """Whether this step needs tools, and which catalog names the model may call.
+
+    Chat hides business tools. Act and sticky pass the whole catalog: a user's
+    token is the permission check, and a short list must not pretend a tool is missing.
+    """
 
     mode: str
     include: set[str] = field(default_factory=set)
@@ -128,144 +132,8 @@ class SystemOneClient:
         return answers
 
 
-def _cap_names(names: list[str], *, limit: int) -> set[str]:
-    if limit <= 0:
-        return set()
-    return set(names[:limit])
-
-
-def _domain_cap(tools: list[Tool], *, domain: str, limit: int) -> set[str]:
-    ordered = [tool.name for tool in tools if (tool.domain or "general") == domain]
-    return _cap_names(ordered, limit=limit)
-
-
-def _family_of(tool: Tool | None) -> str | None:
-    if tool is None:
-        return None
-    family = getattr(tool, "family", None)
-    if family is None:
-        return None
-    text = str(family).strip()
-    return text or None
-
-
-def _family_expand(tools: list[Tool], seeds: list[str] | set[str]) -> set[str]:
-    by_name = {tool.name: tool for tool in tools}
-    families = {_family_of(by_name.get(name)) for name in seeds}
-    families.discard(None)
-    if not families:
-        return set()
-    return {
-        tool.name
-        for tool in tools
-        if _family_of(tool) in families
-    }
-
-
-def _expand_act_include(
-    tools: list[Tool],
-    *,
-    winner: str,
-    max_tools: int,
-) -> set[str]:
-    by_name = {tool.name: tool for tool in tools}
-    winner_tool = by_name.get(winner)
-    ordered: list[str] = [winner]
-
-    family = _family_expand(tools, [winner])
-    for tool in tools:
-        if tool.name in family and tool.name not in ordered:
-            ordered.append(tool.name)
-
-    if winner_tool is None:
-        return _cap_names(ordered, limit=max_tools)
-
-    winner_tokens = set(winner.split("_"))
-    domain = winner_tool.domain or "general"
-    siblings = [
-        tool
-        for tool in tools
-        if tool.name not in ordered and (tool.domain or "general") == domain
-    ]
-    reads = [tool for tool in siblings if tool.effect == ToolEffect.READ]
-    others = [tool for tool in siblings if tool.effect != ToolEffect.READ]
-
-    def _affinity(tool: Tool) -> tuple[int, int]:
-        shared = len(winner_tokens & set(tool.name.split("_")))
-        return (-shared, siblings.index(tool))
-
-    # 读意图：只并入同 domain 只读，避免写家族粘住。
-    expand = reads if winner_tool.effect == ToolEffect.READ else reads + others
-    for tool in sorted(expand, key=_affinity):
-        if len(ordered) >= max_tools:
-            break
-        ordered.append(tool.name)
-    return _cap_names(ordered, limit=max_tools)
-
-
-def _sticky_include(
-    tools: list[Tool],
-    *,
-    previous: set[str] | None,
-    recent_tool_names: list[str],
-    winner: str | None,
-    max_tools: int,
-) -> set[str]:
-    by_name = {tool.name: tool for tool in tools}
-
-    # 读意图赢家走 act expand，不被上一轮写家族 previous 锁死。
-    if winner:
-        winner_tool = by_name.get(winner)
-        if winner_tool is not None and winner_tool.effect == ToolEffect.READ:
-            return _expand_act_include(tools, winner=winner, max_tools=max_tools)
-
-    if previous:
-        alive = {name for name in previous if name in by_name}
-        if alive:
-            ordered = sorted(alive)
-            domains = {(by_name[name].domain or "general") for name in ordered}
-            # 写家族短名单并入同 domain 只读工具。
-            for tool in tools:
-                if (
-                    tool.name not in ordered
-                    and (tool.domain or "general") in domains
-                    and tool.effect == ToolEffect.READ
-                ):
-                    ordered.append(tool.name)
-            return _cap_names(ordered, limit=max_tools)
-
-    seeds = list(recent_tool_names)
-    if winner:
-        seeds.append(winner)
-    family = _family_expand(tools, seeds)
-    if family:
-        ordered = [name for name in seeds if name in family]
-        for tool in tools:
-            if tool.name in family and tool.name not in ordered:
-                ordered.append(tool.name)
-        domains = {
-            (by_name[name].domain or "general") for name in ordered if name in by_name
-        }
-        for tool in tools:
-            if (
-                tool.name not in ordered
-                and (tool.domain or "general") in domains
-                and tool.effect == ToolEffect.READ
-            ):
-                ordered.append(tool.name)
-        return _cap_names(ordered, limit=max_tools)
-
-    if winner:
-        tool = by_name.get(winner)
-        if tool is not None:
-            return _domain_cap(tools, domain=tool.domain or "general", limit=max_tools)
-
-    for name in reversed(recent_tool_names):
-        tool = by_name.get(name)
-        if tool is not None:
-            return _domain_cap(tools, domain=tool.domain or "general", limit=max_tools)
-
-    return _cap_names([tool.name for tool in tools], limit=max_tools)
+def _catalog_names(tools: list[Tool]) -> set[str]:
+    return {tool.name for tool in tools}
 
 
 def _noul_value(answers: dict[str, Any], key: str) -> float:
@@ -294,12 +162,10 @@ async def shortlist_tools(
     pending: str = "",
     previous_include: set[str] | None = None,
 ) -> ShortlistResult:
-    """Return a harness shortlist for this model step.
+    """Decide chat vs tools for this step.
 
-    Aligns with the Jev agent-harness contract:
-    - low gate noul → chat (no business tools)
-    - high noul + confident choice → act (winner + family/domain expand)
-    - failure / low confidence → sticky (previous or capped family), never full catalog
+    A low gate hides business tools. Otherwise the model sees the whole catalog.
+    The choice is logged; it does not remove tools the user is allowed to call.
     """
     if not tools:
         return ShortlistResult(mode=MODE_CHAT, include=set(), noul=None)
@@ -321,22 +187,16 @@ async def shortlist_tools(
         },
         **_NOUL_QUESTIONS,
     }
+    catalog = _catalog_names(tools)
     try:
         answers = await client.evaluate(state=state, questions=questions)
     except Exception:
-        include = _sticky_include(
-            tools,
-            previous=previous_include,
-            recent_tool_names=recent_tool_names,
-            winner=None,
-            max_tools=client.settings.max_tools,
-        )
         logger.exception(
             "System One shortlist failed; mode=%s include_size=%d",
             MODE_STICKY,
-            len(include),
+            len(catalog),
         )
-        return ShortlistResult(mode=MODE_STICKY, include=include)
+        return ShortlistResult(mode=MODE_STICKY, include=catalog)
 
     noul = _gate_noul(answers)
     pick = answers.get("tool") or {}
@@ -359,44 +219,19 @@ async def shortlist_tools(
             confidence=confidence,
         )
 
-    if confidence >= client.settings.confidence_threshold and winner:
-        include = _expand_act_include(
-            tools, winner=winner, max_tools=client.settings.max_tools
-        )
-        logger.info(
-            "System One mode=%s noul=%.3f choice=%r confidence=%.3f include_size=%d",
-            MODE_ACT,
-            noul,
-            winner,
-            confidence,
-            len(include),
-        )
-        return ShortlistResult(
-            mode=MODE_ACT,
-            include=include,
-            noul=noul,
-            choice=winner,
-            confidence=confidence,
-        )
-
-    include = _sticky_include(
-        tools,
-        previous=previous_include,
-        recent_tool_names=recent_tool_names,
-        winner=winner or None,
-        max_tools=client.settings.max_tools,
-    )
+    confident = confidence >= client.settings.confidence_threshold and bool(winner)
+    mode = MODE_ACT if confident else MODE_STICKY
     logger.info(
         "System One mode=%s noul=%.3f choice=%r confidence=%.3f include_size=%d",
-        MODE_STICKY,
+        mode,
         noul,
         winner,
         confidence,
-        len(include),
+        len(catalog),
     )
     return ShortlistResult(
-        mode=MODE_STICKY,
-        include=include,
+        mode=mode,
+        include=catalog,
         noul=noul,
         choice=winner or None,
         confidence=confidence,

@@ -16,7 +16,7 @@ library, and no System One policy modules in the host.
 
 ## Role
 
-- **Does:** decide chat vs act; pick one best operation; expand via `domain` / name tokens / optional `family` metadata.
+- **Does:** decide chat vs tools. When tools are needed, the model sees the whole catalog.
 - **Does not:** fill arguments, write prose, replace `approval="always"`, or enforce RBAC.
 
 ## Contract (one evaluate per step)
@@ -38,16 +38,13 @@ gate = max(needs_tool, acts_on_resources, 1 - prose_suffices)
 | Condition | Mode | `include` (business tools) |
 | --- | --- | --- |
 | `gate < threshold` (default 0.5) | `chat` | empty — builtins only |
-| gate ≥ threshold and tool `confidence` ≥ threshold (default 0.6) | `act` | winner ∪ family/domain expand, capped by `max_tools` |
-| transport failure or low confidence | `sticky` | previous step include, else family/domain cap — **never** the full catalog |
+| gate ≥ threshold | `act` or `sticky` | the whole catalog |
+
+The choice is a log line. It does not remove a tool. Execution still uses the caller's token, so a catalog tool the user cannot call fails at the API. Write and delete tools keep their own confirmation.
 
 Builtins (`request_input`, `report_progress`) are always attached by `Agent.tool_schemas`.
 
-**Expand (deterministic):**
-
-- `family` is one user workflow and is atomic. Picking any member includes the whole family, including writes, even when the winner is a read (the catalog step of that workflow). A catalog GET that starts the workflow must carry the same `family`. One family must not mix inventory lists with delete or power actions.
-- `domain` only adds same-area neighbors. A read winner adds other reads. A write winner may also add other writes in that domain, ranked by shared name tokens.
-- Hosts set `family` and `domain` as data on tools (`x-aidy`). Rungent does not special-case product sentences.
+`family` and `domain` on `x-aidy` still describe a workflow and a product area. They are metadata for hosts and for confirmation grouping. They do not decide which tools the model is allowed to see.
 
 ## Configure
 
@@ -68,7 +65,7 @@ runtime = create_openapi_runtime(
 | `SYSTEMONE_TIMEOUT_SECONDS` | `5` | HTTP timeout |
 | `SYSTEMONE_NEEDS_TOOL_THRESHOLD` | `0.5` | Below → `chat` |
 | `SYSTEMONE_CONFIDENCE_THRESHOLD` | `0.6` | Below → `sticky` |
-| `SYSTEMONE_MAX_TOOLS` | `8` | Cap for `act` / `sticky` |
+| `SYSTEMONE_MAX_TOOLS` | `8` | Kept for older hosts. It does not drop catalog tools. |
 
 Logs each step: `mode`, `noul`, `choice`, `confidence`, `include_size`.
 
