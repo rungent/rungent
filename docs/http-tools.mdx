@@ -2,8 +2,8 @@
 
 Hosts that want “same APIs as the console” should not hand-write `@tool` wrappers.
 Point rungent at service **hosts**; it fetches `{base_url}/openapi.json`, keeps
-operations marked `x-aidy`, and lets System One shortlist each step
-(`chat` / `act` / `sticky` — see [System One](/docs/systemone)).
+operations marked `x-aidy`, and lets System One decide each step
+whether to show that whole catalog (`chat` / `act` — see [System One](/docs/systemone)).
 
 ```python
 from rungent import HttpToolSettings, OpenApiHost, create_openapi_runtime, replace_openapi_tools

@@ -183,8 +183,6 @@ class Runtime:
             self.systemone = SystemOneClient(systemone)
         else:
             raise TypeError("systemone must be SystemOneSettings, SystemOneClient, or None")
-        self._systemone_prev_include: dict[str, set[str]] = {}
-
     def _public_error(self, code: str, *, fallback: str | None = None) -> str:
         return self.error_catalog.get(code) or fallback or self.error_catalog["agent_failed"]
 
@@ -315,14 +313,6 @@ class Runtime:
                     return "\n".join(parts)
         return fallback
 
-    @staticmethod
-    def _pending_summary(ctx: ToolContext) -> str:
-        interaction = ctx.interaction_response
-        if interaction is None:
-            return ""
-        kind = getattr(interaction, "kind", None) or type(interaction).__name__
-        return str(kind)[:200]
-
     async def _systemone_include(
         self,
         agent: Agent,
@@ -330,36 +320,15 @@ class Runtime:
         conversation: list[dict[str, Any]],
     ):
         assert self.systemone is not None
-        from .systemone import ShortlistResult, shortlist_tools
+        from .systemone import shortlist_tools
 
-        recent: list[str] = []
-        for message in conversation:
-            if message.get("role") == "assistant":
-                for call in message.get("tool_calls") or []:
-                    name = (call.get("function") or {}).get("name")
-                    if name:
-                        recent.append(str(name))
-        focus = ""
-        resource = ctx.resource if isinstance(ctx.resource, dict) else {}
-        raw_focus = resource.get("focus")
-        if isinstance(raw_focus, dict):
-            focus = str(raw_focus.get("primary_id") or raw_focus.get("ordered_ids") or "")
-        sticky_key = ctx.run_id or ctx.session_id
-        previous = self._systemone_prev_include.get(sticky_key)
-        result: ShortlistResult = await shortlist_tools(
+        return await shortlist_tools(
             self.systemone,
             tools=list(agent.tools),
             user_input=self._latest_user_turn(
                 conversation, fallback=ctx.current_input or ""
             ),
-            recent_tool_names=recent,
-            focus_summary=focus,
-            pending=self._pending_summary(ctx),
-            previous_include=previous,
         )
-        if result.mode != "chat":
-            self._systemone_prev_include[sticky_key] = set(result.include)
-        return result
 
     def _compact_conversation(
         self,

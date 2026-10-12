@@ -15,7 +15,6 @@ _BUILTIN = frozenset({"request_input", "report_progress"})
 
 MODE_CHAT = "chat"
 MODE_ACT = "act"
-MODE_STICKY = "sticky"
 
 # Product-neutral Noul questions (skill-suggestion style). Gate uses the mean.
 _NOUL_QUESTIONS: dict[str, dict[str, Any]] = {
@@ -55,8 +54,6 @@ class SystemOneSettings:
     timeout_seconds: float = 5.0
     api_key: str | None = None
     needs_tool_threshold: float = 0.5
-    confidence_threshold: float = 0.6
-    max_tools: int = 8
 
     @classmethod
     def from_env(cls, *, prefix: str = "SYSTEMONE_") -> "SystemOneSettings | None":
@@ -73,24 +70,19 @@ class SystemOneSettings:
             timeout_seconds=float(os.environ.get(f"{prefix}TIMEOUT_SECONDS") or "5"),
             api_key=(os.environ.get(f"{prefix}API_KEY") or "").strip() or None,
             needs_tool_threshold=float(os.environ.get(f"{prefix}NEEDS_TOOL_THRESHOLD") or "0.5"),
-            confidence_threshold=float(os.environ.get(f"{prefix}CONFIDENCE_THRESHOLD") or "0.6"),
-            max_tools=int(os.environ.get(f"{prefix}MAX_TOOLS") or "8"),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class ShortlistResult:
-    """Whether this step needs tools, and which catalog names the model may call.
+    """Chat hides business tools. Act gives the model the whole catalog.
 
-    Chat hides business tools. Act and sticky pass the whole catalog: a user's
-    token is the permission check, and a short list must not pretend a tool is missing.
+    The caller's token is the permission check. A gate must not drop a catalog tool.
     """
 
     mode: str
     include: set[str] = field(default_factory=set)
     noul: float | None = None
-    choice: str | None = None
-    confidence: float | None = None
 
 
 class SystemOneClient:
@@ -157,85 +149,37 @@ async def shortlist_tools(
     *,
     tools: list[Tool],
     user_input: str,
-    recent_tool_names: list[str],
-    focus_summary: str = "",
-    pending: str = "",
-    previous_include: set[str] | None = None,
 ) -> ShortlistResult:
-    """Decide chat vs tools for this step.
-
-    A low gate hides business tools. Otherwise the model sees the whole catalog.
-    The choice is logged; it does not remove tools the user is allowed to call.
-    """
+    """Decide chat vs the whole catalog for this step."""
     if not tools:
         return ShortlistResult(mode=MODE_CHAT, include=set(), noul=None)
 
-    tool_criteria = {
-        item.name: (item.description or item.title or item.name)[:200] for item in tools
-    }
-    state = {
-        "turn": user_input[:2000],
-        "recent_tools": recent_tool_names[-6:],
-        "focus": focus_summary[:500],
-        "pending": pending[:500],
-    }
-    questions: dict[str, Any] = {
-        "tool": {
-            "type": "choice",
-            "instructions": "Which API or tool best completes `turn`?",
-            "criteria": tool_criteria,
-        },
-        **_NOUL_QUESTIONS,
-    }
     catalog = _catalog_names(tools)
     try:
-        answers = await client.evaluate(state=state, questions=questions)
+        answers = await client.evaluate(
+            state={"turn": user_input[:2000]},
+            questions=_NOUL_QUESTIONS,
+        )
     except Exception:
         logger.exception(
-            "System One shortlist failed; mode=%s include_size=%d",
-            MODE_STICKY,
+            "System One gate failed; mode=%s include_size=%d",
+            MODE_ACT,
             len(catalog),
         )
-        return ShortlistResult(mode=MODE_STICKY, include=catalog)
+        return ShortlistResult(mode=MODE_ACT, include=catalog)
 
     noul = _gate_noul(answers)
-    pick = answers.get("tool") or {}
-    winner = str(pick.get("choice") or "") if isinstance(pick, dict) else ""
-    confidence = float(pick.get("confidence") or 0) if isinstance(pick, dict) else 0.0
-
     if noul < client.settings.needs_tool_threshold:
-        logger.info(
-            "System One mode=%s noul=%.3f choice=%r confidence=%.3f include_size=0",
-            MODE_CHAT,
-            noul,
-            winner,
-            confidence,
-        )
-        return ShortlistResult(
-            mode=MODE_CHAT,
-            include=set(),
-            noul=noul,
-            choice=winner or None,
-            confidence=confidence,
-        )
+        logger.info("System One mode=%s noul=%.3f include_size=0", MODE_CHAT, noul)
+        return ShortlistResult(mode=MODE_CHAT, include=set(), noul=noul)
 
-    confident = confidence >= client.settings.confidence_threshold and bool(winner)
-    mode = MODE_ACT if confident else MODE_STICKY
     logger.info(
-        "System One mode=%s noul=%.3f choice=%r confidence=%.3f include_size=%d",
-        mode,
+        "System One mode=%s noul=%.3f include_size=%d",
+        MODE_ACT,
         noul,
-        winner,
-        confidence,
         len(catalog),
     )
-    return ShortlistResult(
-        mode=mode,
-        include=catalog,
-        noul=noul,
-        choice=winner or None,
-        confidence=confidence,
-    )
+    return ShortlistResult(mode=MODE_ACT, include=catalog, noul=noul)
 
 
 def is_builtin_tool_name(name: str) -> bool:

@@ -1,8 +1,8 @@
 # Rungent integration guide for coding agents
 
 **Preferred host path (0.5+):** `create_openapi_runtime` + allowlist/OpenAPI HTTP tools + optional
-`SystemOneSettings.from_env()` for per-step **chat / act / sticky** shortlisting (never full-catalog
-fail-open). Hand-written `@tool` remains available for product-specific intents. See
+`SystemOneSettings.from_env()` for a per-step **chat / act** gate (act shows the whole catalog).
+Hand-written `@tool` remains available for product-specific intents. See
 `docs/http-tools.mdx` and `docs/systemone.mdx`.
 
 This is the canonical short context for an AI coding agent integrating Rungent.

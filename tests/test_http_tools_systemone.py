@@ -21,7 +21,6 @@ from rungent.state import Identity
 from rungent.systemone import (
     MODE_ACT,
     MODE_CHAT,
-    MODE_STICKY,
     SystemOneClient,
     SystemOneSettings,
     shortlist_tools,
@@ -67,7 +66,7 @@ def _tool(
 def _one_shot_answers(answers: dict[str, Any]):
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        assert "tool" in payload["questions"]
+        assert "tool" not in payload["questions"]
         assert "needs_tool" in payload["questions"]
         assert "acts_on_resources" in payload["questions"]
         assert "prose_suffices" in payload["questions"]
@@ -78,27 +77,21 @@ def _one_shot_answers(answers: dict[str, Any]):
     return handler
 
 
-def _high_gate_answers(*, choice: str, confidence: float = 0.95) -> dict[str, Any]:
+def _high_gate_answers() -> dict[str, Any]:
     return {
         "needs_tool": {"type": "noul", "noul": 0.9},
         "acts_on_resources": {"type": "noul", "noul": 0.9},
         "prose_suffices": {"type": "noul", "noul": 0.1},
-        "tool": {
-            "type": "choice",
-            "choice": choice,
-            "confidence": confidence,
-            "probabilities": {choice: confidence},
-        },
     }
 
 
 @pytest.mark.asyncio
 async def test_shortlist_act_picks_tool_not_other_domain():
-    settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.5)
+    settings = SystemOneSettings(base_url="http://systemone.test")
     client = SystemOneClient(settings)
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
-        transport=httpx.MockTransport(_one_shot_answers(_high_gate_answers(choice="list_vms"))),
+        transport=httpx.MockTransport(_one_shot_answers(_high_gate_answers())),
     )
     client._owns_client = True
 
@@ -106,7 +99,6 @@ async def test_shortlist_act_picks_tool_not_other_domain():
         client,
         tools=[_tool("list_vms", "vm"), _tool("list_elastic", "elastic")],
         user_input="列出云服务器",
-        recent_tool_names=[],
     )
     assert result.mode == MODE_ACT
     assert result.include == {"list_vms", "list_elastic"}
@@ -115,16 +107,12 @@ async def test_shortlist_act_picks_tool_not_other_domain():
 
 @pytest.mark.asyncio
 async def test_shortlist_act_merges_family_within_max_tools():
-    settings = SystemOneSettings(
-        base_url="http://systemone.test",
-        confidence_threshold=0.5,
-        max_tools=6,
-    )
+    settings = SystemOneSettings(base_url="http://systemone.test")
     client = SystemOneClient(settings)
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
         transport=httpx.MockTransport(
-            _one_shot_answers(_high_gate_answers(choice="create_vm_draft"))
+            _one_shot_answers(_high_gate_answers())
         ),
     )
     client._owns_client = True
@@ -142,7 +130,6 @@ async def test_shortlist_act_merges_family_within_max_tools():
             _tool("patch_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE),
         ],
         user_input="创建一台云服务器",
-        recent_tool_names=[],
     )
     assert result.mode == MODE_ACT
     assert {tool.name for tool in [
@@ -160,7 +147,7 @@ async def test_shortlist_act_merges_family_within_max_tools():
 
 @pytest.mark.asyncio
 async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
-    settings = SystemOneSettings(base_url="http://systemone.test", max_tools=8)
+    settings = SystemOneSettings(base_url="http://systemone.test")
     client = SystemOneClient(settings)
     tools = [
         _tool("list_vms", "vm"),
@@ -176,7 +163,7 @@ async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
         transport=httpx.MockTransport(
-            _one_shot_answers(_high_gate_answers(choice="vm_create_options"))
+            _one_shot_answers(_high_gate_answers())
         ),
     )
     client._owns_client = True
@@ -184,7 +171,6 @@ async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
         client,
         tools=tools,
         user_input="先列出可选规格，不要下单",
-        recent_tool_names=[],
     )
     assert catalog.mode == MODE_ACT
     assert {tool.name for tool in tools} == catalog.include
@@ -194,7 +180,7 @@ async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
         transport=httpx.MockTransport(
-            _one_shot_answers(_high_gate_answers(choice="list_vms"))
+            _one_shot_answers(_high_gate_answers())
         ),
     )
     client._owns_client = True
@@ -202,7 +188,6 @@ async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
         client,
         tools=tools,
         user_input="列出云服务器",
-        recent_tool_names=[],
     )
     assert listed.mode == MODE_ACT
     assert {tool.name for tool in tools} == listed.include
@@ -211,7 +196,7 @@ async def test_read_catalog_in_family_includes_writes_bare_list_does_not():
 
 @pytest.mark.asyncio
 async def test_shortlist_low_noul_is_chat_empty_include():
-    settings = SystemOneSettings(base_url="http://systemone.test", confidence_threshold=0.6)
+    settings = SystemOneSettings(base_url="http://systemone.test")
     client = SystemOneClient(settings)
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
@@ -237,7 +222,6 @@ async def test_shortlist_low_noul_is_chat_empty_include():
         client,
         tools=[_tool("list_vms", "vm"), _tool("list_elastic", "elastic")],
         user_input="你好",
-        recent_tool_names=[],
     )
     assert result.mode == MODE_CHAT
     assert result.include == set()
@@ -245,19 +229,15 @@ async def test_shortlist_low_noul_is_chat_empty_include():
 
 
 @pytest.mark.asyncio
-async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
-    settings = SystemOneSettings(
-        base_url="http://systemone.test",
-        confidence_threshold=0.6,
-        max_tools=3,
-    )
+async def test_shortlist_open_gate_includes_whole_catalog():
+    settings = SystemOneSettings(base_url="http://systemone.test")
     client = SystemOneClient(settings)
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
         transport=httpx.MockTransport(
             _one_shot_answers(
                 {
-                    **_high_gate_answers(choice="create_vm_draft", confidence=0.4),
+                    **_high_gate_answers(),
                     "tool": {
                         "type": "choice",
                         "choice": "create_vm_draft",
@@ -283,28 +263,22 @@ async def test_shortlist_low_confidence_uses_sticky_not_full_catalog():
         client,
         tools=catalog,
         user_input="创建一台云服务器",
-        recent_tool_names=["create_vm_draft"],
-        previous_include={"create_vm_draft", "prepare_vm_draft"},
     )
-    assert result.mode == MODE_STICKY
+    assert result.mode == MODE_ACT
     assert {tool.name for tool in catalog} == result.include
     await client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_sticky_read_winner_escapes_previous_write_family():
-    settings = SystemOneSettings(
-        base_url="http://systemone.test",
-        confidence_threshold=0.6,
-        max_tools=4,
-    )
+async def test_read_turn_still_includes_writes():
+    settings = SystemOneSettings(base_url="http://systemone.test")
     client = SystemOneClient(settings)
     client._client = httpx.AsyncClient(
         base_url=settings.base_url,
         transport=httpx.MockTransport(
             _one_shot_answers(
                 {
-                    **_high_gate_answers(choice="get_vm", confidence=0.4),
+                    **_high_gate_answers(),
                     "tool": {
                         "type": "choice",
                         "choice": "get_vm",
@@ -327,18 +301,16 @@ async def test_sticky_read_winner_escapes_previous_write_family():
             _tool("list_elastic", "elastic"),
         ],
         user_input="查看这台云服务器详情",
-        recent_tool_names=["create_vm_draft"],
-        previous_include={"create_vm_draft", "prepare_vm_draft"},
     )
-    assert result.mode == MODE_STICKY
+    assert result.mode == MODE_ACT
     assert "create_vm_draft" in result.include
     assert "list_elastic" in result.include
     await client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_shortlist_transport_failure_sticky_not_full_catalog():
-    settings = SystemOneSettings(base_url="http://systemone.test", max_tools=3)
+async def test_shortlist_transport_failure_includes_whole_catalog():
+    settings = SystemOneSettings(base_url="http://systemone.test")
     client = SystemOneClient(settings)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -360,10 +332,8 @@ async def test_shortlist_transport_failure_sticky_not_full_catalog():
         client,
         tools=catalog,
         user_input="继续",
-        recent_tool_names=["create_vm_draft"],
-        previous_include={"create_vm_draft", "prepare_vm_draft", "commit_vm_draft"},
     )
-    assert result.mode == MODE_STICKY
+    assert result.mode == MODE_ACT
     assert {tool.name for tool in catalog} == result.include
     await client.aclose()
 
