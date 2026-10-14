@@ -665,6 +665,83 @@ def test_load_operations_from_config_uses_x_aidy_metadata(tmp_path: Path):
     assert "Paginated" in ops[0].summary
 
 
+def test_http_error_message_surfaces_validation_fields():
+    from rungent.http_tools import _http_error_message
+
+    message = _http_error_message(
+        {
+            "detail": [
+                {
+                    "type": "extra_forbidden",
+                    "loc": ["body", "inputs", "rootdisksize"],
+                    "msg": "Extra inputs are not permitted",
+                },
+                {
+                    "type": "missing",
+                    "loc": ["body", "inputs", "zone"],
+                    "msg": "Field required",
+                },
+            ]
+        }
+    )
+    assert "rootdisksize" in message
+    assert "zone" in message
+    assert message != "参数不合法，请检查后重试"
+
+
+def test_wrap_body_flattens_nested_input_fields():
+    openapi = {
+        "components": {
+            "schemas": {
+                "DraftInputs": {
+                    "type": "object",
+                    "properties": {
+                        "zone": {"type": "string"},
+                        "root_disk_gib": {"type": "integer", "description": "系统盘 GiB"},
+                    },
+                },
+                "DraftCreate": {
+                    "type": "object",
+                    "properties": {
+                        "inputs": {"$ref": "#/components/schemas/DraftInputs"},
+                        "vg_ssh_keys": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            }
+        },
+        "paths": {
+            "/vm/create-drafts": {
+                "post": {
+                    "operationId": "create_vm_draft",
+                    "summary": "Create draft",
+                    "x-aidy": {
+                        "domain": "vm",
+                        "name": "create_vm_draft",
+                        "family": "vm_draft",
+                        "wrap_body": "inputs",
+                        "approval": "never",
+                    },
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/DraftCreate"}
+                            }
+                        },
+                    },
+                }
+            }
+        },
+    }
+    ops = operations_from_openapi(openapi, path_prefix="/api", require_aidy_flag=True)
+    assert len(ops) == 1
+    props = ops[0].parameters["properties"]
+    assert "root_disk_gib" in props
+    assert "zone" in props
+    assert "inputs" not in props
+    assert ops[0].wrap_body == "inputs"
+
+
 def test_operations_from_openapi_reads_x_aidy_metadata():
     openapi = {
         "paths": {

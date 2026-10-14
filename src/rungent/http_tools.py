@@ -151,49 +151,95 @@ def _format_path(template: str, values: Mapping[str, Any]) -> str:
     return _PATH_PARAM.sub(replace, template)
 
 
-def _missing_questions(payload: Any) -> list[InteractionQuestion] | None:
-    if not isinstance(payload, dict):
-        return None
-    missing = payload.get("missing") or payload.get("issues")
-    if not isinstance(missing, list) or not missing:
-        return None
-    questions: list[InteractionQuestion] = []
-    for item in missing[:8]:
-        if isinstance(item, str):
-            questions.append(
-                InteractionQuestion(id=item, kind="text", prompt=f"请提供 {item}", required=True)
-            )
+_SKIP_LOC = frozenset({"body", "query", "path", "header", "cookie", "inputs"})
+
+
+def _loc_path(loc: Any) -> str:
+    parts = [str(item) for item in (loc or []) if item not in _SKIP_LOC]
+    return ".".join(parts)
+
+
+def _validation_detail_message(detail: list[Any]) -> str:
+    parts: list[str] = []
+    for item in detail[:8]:
+        if isinstance(item, str) and item.strip():
+            parts.append(item.strip())
             continue
         if not isinstance(item, dict):
             continue
-        field = str(item.get("field") or item.get("id") or "").strip()
-        message = str(item.get("message") or item.get("prompt") or field).strip()
-        if not field:
-            continue
-        options_raw = item.get("options")
-        if isinstance(options_raw, list) and options_raw:
-            options = [
-                InteractionOption(
-                    id=str(opt.get("id") if isinstance(opt, dict) else opt),
-                    label=str(
-                        (opt.get("label") if isinstance(opt, dict) else opt) or opt
-                    ),
+        path = _loc_path(item.get("loc"))
+        message = str(item.get("msg") or item.get("message") or "").strip()
+        if path and message:
+            parts.append(f"{path}: {message}")
+        elif message:
+            parts.append(message)
+    text = "；".join(parts).strip()
+    return text[:500] if text else "参数不合法，请检查后重试"
+
+
+def _missing_questions(payload: Any) -> list[InteractionQuestion] | None:
+    if not isinstance(payload, dict):
+        return None
+    questions: list[InteractionQuestion] = []
+    missing = payload.get("missing") or payload.get("issues")
+    if isinstance(missing, list):
+        for item in missing[:8]:
+            if isinstance(item, str):
+                questions.append(
+                    InteractionQuestion(
+                        id=item, kind="text", prompt=f"请提供 {item}", required=True
+                    )
                 )
-                for opt in options_raw
-                if (isinstance(opt, dict) and opt.get("id")) or not isinstance(opt, dict)
-            ]
-            questions.append(
-                InteractionQuestion(
-                    id=field,
-                    kind="choice",
-                    prompt=message or field,
-                    required=True,
-                    options=options,
+                continue
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get("field") or item.get("id") or "").strip()
+            message = str(item.get("message") or item.get("prompt") or field).strip()
+            if not field:
+                continue
+            options_raw = item.get("options")
+            if isinstance(options_raw, list) and options_raw:
+                options = [
+                    InteractionOption(
+                        id=str(opt.get("id") if isinstance(opt, dict) else opt),
+                        label=str(
+                            (opt.get("label") if isinstance(opt, dict) else opt) or opt
+                        ),
+                    )
+                    for opt in options_raw
+                    if (isinstance(opt, dict) and opt.get("id")) or not isinstance(opt, dict)
+                ]
+                questions.append(
+                    InteractionQuestion(
+                        id=field,
+                        kind="choice",
+                        prompt=message or field,
+                        required=True,
+                        options=options,
+                    )
                 )
-            )
-        else:
+            else:
+                questions.append(
+                    InteractionQuestion(
+                        id=field, kind="text", prompt=message or field, required=True
+                    )
+                )
+    detail = payload.get("detail")
+    if isinstance(detail, list):
+        seen = {question.id for question in questions}
+        for item in detail[:8]:
+            if not isinstance(item, dict):
+                continue
+            if "missing" not in str(item.get("type") or ""):
+                continue
+            path = _loc_path(item.get("loc"))
+            field = path.split(".")[-1] if path else ""
+            if not field or field in seen:
+                continue
+            seen.add(field)
+            message = str(item.get("msg") or f"请提供 {field}").strip()
             questions.append(
-                InteractionQuestion(id=field, kind="text", prompt=message or field, required=True)
+                InteractionQuestion(id=field, kind="text", prompt=message, required=True)
             )
     return questions or None
 
@@ -233,7 +279,7 @@ def _http_error_message(payload: Any) -> str:
         return "请求失败"
     detail = payload.get("detail")
     if isinstance(detail, list):
-        return "参数不合法，请检查后重试"
+        return _validation_detail_message(detail)
     if isinstance(detail, dict):
         message = detail.get("msg") or detail.get("message") or detail.get("detail")
         if message:
@@ -556,6 +602,38 @@ def tools_from_operations(
     return tools
 
 
+def _resolve_schema(
+    schema: Any,
+    spec: Mapping[str, Any],
+    *,
+    seen: set[str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        return {"type": "string"}
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/"):
+        visited = set() if seen is None else seen
+        if ref in visited:
+            return {"type": "object"}
+        visited.add(ref)
+        node: Any = spec
+        for part in ref[2:].split("/"):
+            if not isinstance(node, Mapping) or part not in node:
+                return {"type": "object"}
+            node = node[part]
+        return _resolve_schema(node, spec, seen=visited)
+    if isinstance(schema.get("allOf"), list):
+        merged: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+        properties = merged["properties"]
+        required = merged["required"]
+        for item in schema["allOf"]:
+            resolved = _resolve_schema(item, spec, seen=seen)
+            properties.update(resolved.get("properties") or {})
+            required.extend(str(name) for name in (resolved.get("required") or []))
+        return merged
+    return schema
+
+
 def operations_from_openapi(
     spec: Mapping[str, Any],
     *,
@@ -638,11 +716,11 @@ def operations_from_openapi(
             body = (operation.get("requestBody") or {}).get("content", {})
             json_body = body.get("application/json") if isinstance(body, dict) else None
             if isinstance(json_body, dict) and json_body.get("schema"):
-                body_schema = json_body["schema"]
+                body_schema = _resolve_schema(json_body["schema"], spec)
                 desc = "JSON request body"
-                if isinstance(body_schema, dict) and body_schema.get("description"):
+                if body_schema.get("description"):
                     desc = str(body_schema["description"])
-                if isinstance(body_schema, dict) and body_schema.get("type") == "object":
+                if body_schema.get("type") == "object" or body_schema.get("properties"):
                     for prop_name, prop_schema in (body_schema.get("properties") or {}).items():
                         if prop_name in properties:
                             continue
@@ -663,6 +741,18 @@ def operations_from_openapi(
                         required.append("body")
             family = operation.get("x-aidy-family") or meta.get("family")
             wrap_body = operation.get("x-aidy-wrap-body") or meta.get("wrap_body")
+            if wrap_body and wrap_body in properties:
+                wrapped = _resolve_schema(properties[wrap_body], spec)
+                for prop_name, prop_schema in (wrapped.get("properties") or {}).items():
+                    if prop_name in properties:
+                        continue
+                    if isinstance(prop_schema, dict):
+                        properties[prop_name] = prop_schema
+                    else:
+                        properties[prop_name] = {"type": "string"}
+                properties.pop(wrap_body, None)
+                if wrap_body in required:
+                    required.remove(wrap_body)
             strip_ips = bool(
                 operation.get("x-aidy-strip-ips")
                 or meta.get("strip_ips")
