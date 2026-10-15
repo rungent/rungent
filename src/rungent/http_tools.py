@@ -21,7 +21,7 @@ from .state import (
     ToolContinuation,
     ToolResult,
 )
-from .tools import ApprovalPolicy, Tool, ToolContext, ToolEffect, ToolFunction
+from .tools import ApprovalPolicy, Tool, ToolContext, ToolEffect, ToolFunction, parse_tool_follow
 
 AuthorizationFactory = Callable[[ToolContext], str | None | Awaitable[str | None]]
 RedactFn = Callable[[Any], Any]
@@ -72,6 +72,7 @@ class HttpOperation:
     # When set (e.g. "inputs"), wrap a flat JSON object as {inputs: ...} if the key is absent.
     wrap_body: str | None = None
     family: str | None = None
+    follow: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         method = self.method.upper()
@@ -585,6 +586,7 @@ def build_http_tool(operation: HttpOperation, settings: HttpToolSettings) -> Too
         requires_interaction_response=False,
         domain=operation.domain,
         family=operation.family,
+        follow=parse_tool_follow(operation.follow),
     )
 
 
@@ -740,6 +742,13 @@ def operations_from_openapi(
                     if len(properties) == 1:
                         required.append("body")
             family = operation.get("x-aidy-family") or meta.get("family")
+            follow_value = operation.get("x-aidy-next") or meta.get("next")
+            follow = parse_tool_follow(follow_value)
+            follow_data = (
+                None
+                if follow is None
+                else {"tool": follow.tool, "arguments": follow.arguments, "when": follow.when}
+            )
             wrap_body = operation.get("x-aidy-wrap-body") or meta.get("wrap_body")
             if wrap_body and wrap_body in properties:
                 wrapped = _resolve_schema(properties[wrap_body], spec)
@@ -781,6 +790,7 @@ def operations_from_openapi(
                     strip_ips=strip_ips,
                     wrap_body=str(wrap_body) if wrap_body else None,
                     family=str(family) if family else None,
+                    follow=follow_data,
                     approval=str(approval) if approval else None,
                     confirmation=confirmation_value,
                     effect=str(effect) if effect else None,
@@ -978,6 +988,7 @@ def _apply_operation_overrides(
             "strip_ips": operation.strip_ips,
             "wrap_body": operation.wrap_body,
             "family": operation.family,
+            "follow": operation.follow,
         }
         data.update({key: value for key, value in patch.items() if value is not None})
         result.append(HttpOperation(**data))
@@ -1043,6 +1054,7 @@ def load_operations_from_sources(
                 "strip_ips": item.strip_ips,
                 "wrap_body": item.wrap_body,
                 "family": item.family,
+                "follow": item.follow,
             }
             for item in static_operations
         ]

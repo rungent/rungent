@@ -104,6 +104,48 @@ class _AcceptedInteraction:
     event: Event
 
 
+def _lookup_document(document: Mapping[str, Any], path: str) -> Any:
+    current: Any = document
+    for part in path.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _resource_document(result: ToolResult) -> Mapping[str, Any] | None:
+    data = result.data
+    if not isinstance(data, dict):
+        return None
+    body = data.get("body")
+    if isinstance(body, dict):
+        return body
+    if "ok" in data or "status_code" in data:
+        return None
+    return data
+
+
+def follow_tool_call(agent: Agent, tool: Tool, result: ToolResult | None) -> ToolCall | None:
+    spec = tool.follow
+    if spec is None or result is None or not result.succeeded:
+        return None
+    if result.interaction is not None or result.deferred is not None:
+        return None
+    document = _resource_document(result)
+    if document is None or agent.tool_map().get(spec.tool) is None:
+        return None
+    for key, expected in spec.when.items():
+        if _lookup_document(document, key) != expected:
+            return None
+    arguments: dict[str, Any] = {}
+    for dest, source in spec.arguments.items():
+        value = _lookup_document(document, source)
+        if value is None:
+            return None
+        arguments[dest] = value
+    return ToolCall(id=new_id("call"), name=spec.tool, arguments=arguments)
+
+
 _CLIENT_BOUNDARIES = {
     RunStatus.COMPLETED,
     RunStatus.FAILED,
@@ -1774,7 +1816,10 @@ class Runtime:
                 ),
             )
 
-            for call in completed.tool_calls:
+            queue = list(completed.tool_calls)
+            followed: set[str] = set()
+            while queue:
+                call = queue.pop(0)
                 if call.name == "report_progress":
                     message = call.arguments.get("message")
                     if not isinstance(message, str) or not message.strip() or len(message) > 280:
@@ -2019,7 +2064,10 @@ class Runtime:
                     )
                     return
 
-                async for event in self._execute_tool(session, run, ctx, tool, call, emitter):
+                result_out: list[ToolResult] = []
+                async for event in self._execute_tool(
+                    session, run, ctx, tool, call, emitter, result_out=result_out
+                ):
                     yield event
                 if run.status in {
                     RunStatus.WAITING_INPUT,
@@ -2029,6 +2077,18 @@ class Runtime:
                     return
                 if tool.requires_interaction_response:
                     ctx.interaction_response = None
+                follow = follow_tool_call(agent, tool, result_out[-1] if result_out else None)
+                if (
+                    follow is not None
+                    and follow.name not in followed
+                    and all(pending.name != follow.name for pending in queue)
+                ):
+                    followed.add(follow.name)
+                    await self.store.append_message(
+                        session.id,
+                        Message(role="assistant", tool_calls=[follow]),
+                    )
+                    queue.append(follow)
 
         run.status = RunStatus.FAILED
         run.error = f"Agent exceeded the maximum of {self.max_model_steps} model steps"
@@ -2291,6 +2351,7 @@ class Runtime:
         tool: Tool,
         call: ToolCall,
         emitter: EventEmitter,
+        result_out: list[ToolResult] | None = None,
     ) -> AsyncIterator[Event]:
         redacted_arguments = redact(call.arguments)
         started_execution = execution_payload(arguments=call.arguments, status="running")
@@ -2347,6 +2408,8 @@ class Runtime:
                     public=public,
                 )
             result = await execution
+            if result_out is not None:
+                result_out.append(result)
             if progress_message is not None:
                 yield await self._emit(
                     emitter,

@@ -1,15 +1,147 @@
 import inspect
+import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
+from types import UnionType
+from typing import Annotated, Any, Union, cast, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from .state import ApprovalImpact, Identity, ToolResult, TrustedInteractionResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _union_members(annotation: Any) -> list[Any]:
+    origin = get_origin(annotation)
+    if origin not in {UnionType, Union}:
+        return [annotation]
+    return [item for item in get_args(annotation) if item is not type(None)]
+
+
+def _json_container(value: str) -> Any:
+    text = value.strip()
+    if len(text) < 2 or text[0] not in "[{":
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, (list, dict)) else None
+
+
+def _matches(annotation: Any, value: Any) -> bool:
+    origin = get_origin(annotation)
+    if annotation is Any:
+        return True
+    if annotation is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if annotation is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if annotation is bool:
+        return isinstance(value, bool)
+    if annotation is str:
+        return isinstance(value, str)
+    if origin is list or annotation is list:
+        return isinstance(value, list)
+    if origin is dict or annotation is dict:
+        return isinstance(value, dict)
+    return False
+
+
+def coerce_value(annotation: Any, value: Any) -> Any:
+    """Turn model-emitted JSON strings into the declared tool argument type."""
+    if value is None:
+        return None
+    members = _union_members(annotation)
+    if len(members) != 1:
+        if isinstance(value, str):
+            parsed = _json_container(value)
+            if parsed is not None:
+                for member in members:
+                    if _matches(member, parsed):
+                        return coerce_value(member, parsed)
+        for member in members:
+            if member is str:
+                continue
+            coerced = coerce_value(member, value)
+            if coerced is not value and _matches(member, coerced):
+                return coerced
+        return value
+    target = members[0]
+    origin = get_origin(target)
+    if origin is list or target is list:
+        if isinstance(value, str):
+            parsed = _json_container(value)
+            value = parsed if isinstance(parsed, list) else [value]
+        item_type = get_args(target)[0] if get_args(target) else Any
+        if isinstance(value, list):
+            return [coerce_value(item_type, item) for item in value]
+        return value
+    if origin is dict or target is dict:
+        if isinstance(value, str):
+            parsed = _json_container(value)
+            if isinstance(parsed, dict):
+                return parsed
+        return value
+    if target is int and isinstance(value, str):
+        text = value.strip()
+        if text and (text.isdigit() or (text[0] == "-" and text[1:].isdigit())):
+            return int(text)
+        return value
+    if target is float and isinstance(value, str):
+        text = value.strip()
+        try:
+            number = float(text)
+        except ValueError:
+            return value
+        return number
+    if target is bool and isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    return value
+
+
+def coerce_arguments(model: type[BaseModel], arguments: Mapping[str, Any]) -> dict[str, Any]:
+    coerced: dict[str, Any] = {}
+    for name, value in arguments.items():
+        declared = model.model_fields.get(name)
+        if declared is None:
+            coerced[name] = value
+            continue
+        coerced[name] = coerce_value(declared.annotation, value)
+    return coerced
+
+
+@dataclass(frozen=True, slots=True)
+class ToolFollow:
+    """Run another tool after this one succeeds, using fields from its result."""
+
+    tool: str
+    arguments: dict[str, str]
+    when: dict[str, Any]
+
+
+def parse_tool_follow(value: Any) -> ToolFollow | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip():
+        return ToolFollow(tool=value.strip(), arguments={}, when={})
+    if not isinstance(value, Mapping):
+        raise ValueError("tool follow must name the next tool")
+    tool_name = str(value.get("tool") or "").strip()
+    if not tool_name:
+        raise ValueError("tool follow requires tool")
+    raw_arguments = value.get("arguments") or {}
+    raw_when = value.get("when") or {}
+    if not isinstance(raw_arguments, Mapping) or not isinstance(raw_when, Mapping):
+        raise ValueError("tool follow arguments and when must be objects")
+    return ToolFollow(
+        tool=tool_name,
+        arguments={str(key): str(source) for key, source in raw_arguments.items()},
+        when={str(key): expected for key, expected in raw_when.items()},
+    )
 
 
 class ToolEffect(StrEnum):
@@ -107,6 +239,7 @@ class Tool:
     requires_interaction_response: bool
     domain: str | None = None
     family: str | None = None
+    follow: ToolFollow | None = None
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -119,6 +252,7 @@ class Tool:
         }
 
     def validate(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        arguments = coerce_arguments(self.input_model, arguments)
         allowed = set(self.input_model.model_fields)
         unknown = sorted(key for key in arguments if key not in allowed)
         if unknown:
@@ -196,6 +330,7 @@ def tool(
     requires_interaction_response: bool = False,
     domain: str | None = None,
     family: str | None = None,
+    follow: str | Mapping[str, Any] | None = None,
 ) -> Callable[[ToolFunction], Tool]:
     def decorate(fn: ToolFunction) -> Tool:
         tool_name = name or fn.__name__
@@ -223,6 +358,7 @@ def tool(
             requires_interaction_response=requires_interaction_response,
             domain=domain,
             family=family,
+            follow=parse_tool_follow(follow),
         )
 
     return decorate

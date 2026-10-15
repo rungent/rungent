@@ -41,3 +41,20 @@ lives on each owning service as `openapi_extra={"x-aidy": {...}}`.
 
 Execution uses the caller's `Authorization` from `ToolContext.deps` and redacts
 secrets (and optional IPs). Structured `missing` / `issues` on 400/422 become forms.
+
+Arguments are coerced to the tool schema before validation: a JSON array or object
+string becomes that value, a bare string in an array field becomes a one-element
+list, and numeric strings become numbers. This applies to every tool, not only HTTP.
+
+`x-aidy.next` runs another catalog tool after a successful result, before the model
+speaks. `arguments` maps the next call's fields to paths on the result body.
+`when` must match or the chain does not run. The next tool's own approval still
+pauses for the confirmation card.
+
+```json
+"next": {
+  "tool": "commit_vm_draft",
+  "arguments": {"draft_id": "id", "revision": "revision"},
+  "when": {"status": "prepared", "issues": []}
+}
+```

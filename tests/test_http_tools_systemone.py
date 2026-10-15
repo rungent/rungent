@@ -862,6 +862,35 @@ async def test_commit_confirmation_uses_draft_fields_not_api_path():
     await async_client.aclose()
 
 
+def test_operations_from_openapi_reads_next_tool():
+    openapi = {
+        "paths": {
+            "/vm/create-drafts/{draft_id}/prepare": {
+                "post": {
+                    "operationId": "prepare_vm_draft",
+                    "summary": "Prepare",
+                    "x-aidy": {
+                        "domain": "vm",
+                        "name": "prepare_vm_draft",
+                        "approval": "never",
+                        "next": {
+                            "tool": "commit_vm_draft",
+                            "arguments": {"draft_id": "id", "revision": "revision"},
+                            "when": {"status": "prepared", "issues": []},
+                        },
+                    },
+                }
+            }
+        }
+    }
+    ops = operations_from_openapi(openapi, require_aidy_flag=True)
+    assert ops[0].follow == {
+        "tool": "commit_vm_draft",
+        "arguments": {"draft_id": "id", "revision": "revision"},
+        "when": {"status": "prepared", "issues": []},
+    }
+
+
 def test_tool_validate_drops_unknown_arguments(caplog: pytest.LogCaptureFixture):
     tool = _tool("prepare_vm_draft", "vm", family="vm_draft", effect=ToolEffect.WRITE)
     with caplog.at_level("WARNING"):

@@ -2273,3 +2273,111 @@ async def test_two_workers_cannot_consume_the_same_approval_twice():
     await asyncio.gather(*runtime._run_tasks.values(), *other._run_tasks.values())
     assert sum(isinstance(answer, ValueError) for answer in answers) == 1
     assert writes == [approval.run_id]
+
+
+def test_tool_arguments_coerce_json_containers_and_numbers():
+    @tool(effect="read", approval="never")
+    async def create(
+        ctx: ToolContext,
+        network_ids: list[str] | None = None,
+        root_disk_gib: int | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> ToolResult:
+        """Create."""
+        return ToolResult(
+            data={"network_ids": network_ids, "root_disk_gib": root_disk_gib, "body": body}
+        )
+
+    validated = create.validate(
+        {
+            "network_ids": '["net-1"]',
+            "root_disk_gib": "50",
+            "body": '{"zone": "z1"}',
+        }
+    )
+    assert validated["network_ids"] == ["net-1"]
+    assert validated["root_disk_gib"] == 50
+    assert validated["body"] == {"zone": "z1"}
+    assert create.validate({"network_ids": "net-1"})["network_ids"] == ["net-1"]
+
+
+_FOLLOW = {
+    "tool": "commit",
+    "arguments": {"draft_id": "id", "revision": "revision"},
+    "when": {"status": "prepared", "issues": []},
+}
+
+
+async def test_follow_raises_the_next_tools_approval_before_the_model_speaks():
+    committed = False
+
+    @tool(effect="write", approval="never", follow=_FOLLOW)
+    async def prepare(ctx: ToolContext) -> ToolResult:
+        """Prepare a draft."""
+        return ToolResult(
+            data={
+                "ok": True,
+                "body": {"id": "d1", "revision": 3, "status": "prepared", "issues": []},
+            }
+        )
+
+    @tool(effect="write", approval="always", confirmation="确认创建？")
+    async def commit(ctx: ToolContext, draft_id: str, revision: int) -> ToolResult:
+        """Commit a draft."""
+        nonlocal committed
+        committed = True
+        return ToolResult(data={"ok": True, "draft_id": draft_id, "revision": revision})
+
+    runtime = runtime_with(
+        [ModelCompleted(tool_calls=[ToolCall(id="p", name="prepare", arguments={})])],
+        [prepare, commit],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Create", identity=identity)
+    )
+    assert committed is False
+    approval = next(event for event in events if event.type == "interaction.requested")
+    assert approval.data["kind"] == "approval"
+    assert approval.data["tool"]["name"] == "commit"
+    assert approval.data["tool"]["arguments"]["draft_id"] == "d1"
+    assert approval.data["tool"]["arguments"]["revision"] == 3
+    assert not any(event.type == "run.completed" for event in events)
+
+
+async def test_follow_does_not_run_when_the_result_does_not_match():
+    @tool(effect="write", approval="never", follow=_FOLLOW)
+    async def prepare(ctx: ToolContext) -> ToolResult:
+        """Prepare a draft."""
+        return ToolResult(
+            data={
+                "ok": True,
+                "body": {
+                    "id": "d1",
+                    "revision": 3,
+                    "status": "prepared",
+                    "issues": [{"field": "zone", "message": "required"}],
+                },
+            }
+        )
+
+    @tool(effect="write", approval="always", confirmation="确认创建？")
+    async def commit(ctx: ToolContext, draft_id: str, revision: int) -> ToolResult:
+        """Commit a draft."""
+        return ToolResult(data={"ok": True})
+
+    runtime = runtime_with(
+        [
+            ModelCompleted(tool_calls=[ToolCall(id="p", name="prepare", arguments={})]),
+            ModelCompleted(text="需要补可用区"),
+        ],
+        [prepare, commit],
+    )
+    identity = Identity(subject_id="u1")
+    session = await runtime.create_session(identity=identity)
+    events = await collect(
+        runtime.stream_run(session_id=session.id, content="Create", identity=identity)
+    )
+    assert not any(event.type == "interaction.requested" for event in events)
+    assert events[-1].type == "run.completed"
