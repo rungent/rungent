@@ -93,7 +93,31 @@ class HttpToolSettings:
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
 
 
+def _effective_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    for key in ("anyOf", "oneOf"):
+        options = schema.get(key)
+        if not isinstance(options, list):
+            continue
+        chosen = next(
+            (
+                option
+                for option in options
+                if isinstance(option, dict) and option.get("type") != "null"
+            ),
+            None,
+        )
+        if chosen is None:
+            continue
+        description = schema.get("description") or chosen.get("description")
+        merged = dict(chosen)
+        if description:
+            merged["description"] = description
+        return merged
+    return schema
+
+
 def _json_type_to_annotation(schema: dict[str, Any]) -> Any:
+    schema = _effective_schema(schema)
     enum = schema.get("enum")
     if isinstance(enum, list) and enum:
         return Any

@@ -862,6 +862,35 @@ async def test_commit_confirmation_uses_draft_fields_not_api_path():
     await async_client.aclose()
 
 
+def test_optional_array_schema_coerces_json_string():
+    operation = HttpOperation(
+        name="create_vm_draft",
+        method="POST",
+        path="/api/vm/create-drafts",
+        summary="Create",
+        parameters={
+            "type": "object",
+            "properties": {
+                "network_ids": {
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "string"}},
+                        {"type": "null"},
+                    ],
+                    "description": "网络 ID 列表",
+                },
+                "root_disk_gib": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                },
+            },
+        },
+    )
+    tool = tools_from_operations([operation], HttpToolSettings(base_url="http://upstream"))[0]
+    validated = tool.validate({"network_ids": '["net-1"]', "root_disk_gib": "50"})
+    assert validated["network_ids"] == ["net-1"]
+    assert validated["root_disk_gib"] == 50
+    assert tool.validate({"network_ids": "net-1"})["network_ids"] == ["net-1"]
+
+
 def test_operations_from_openapi_reads_next_tool():
     openapi = {
         "paths": {
